@@ -1,0 +1,47 @@
+version: "1.0"
+policy_name: "Enterprise Agent Security Policy"
+effective_date: "2026-01-01"
+
+agents:
+  hr_agent:
+    allowed_tools: [db_query, send_email, read_file]
+    db_schemas: [hr]
+    privilege_level: "MEDIUM"
+    payment_limit: 0
+    max_calls_per_minute: 30
+    allowed_hours: [8, 18]
+    can_delegate_to: [orchestrator]
+
+  finance_agent:
+    allowed_tools: [db_query, call_payment_api, send_email]
+    db_schemas: [finance, accounts]
+    privilege_level: "HIGH"
+    payment_limit: 50000
+    max_calls_per_minute: 15
+    allowed_hours: [8, 18]
+    can_delegate_to: [orchestrator]
+
+  devops_agent:
+    allowed_tools: [execute_shell, read_file, write_file, db_query]
+    db_schemas: [devops, logs]
+    privilege_level: "HIGH"
+    shell_whitelist: [git, docker, kubectl, pip, npm]
+    payment_limit: 0
+    max_calls_per_minute: 60
+    allowed_hours: [0, 24]   # DevOps is 24/7
+    can_delegate_to: [orchestrator]
+
+  customer_service_agent:
+    allowed_tools: [db_query, create_ticket, send_email, read_file]
+    db_schemas: [crm, tickets]
+    privilege_level: "LOW"
+    payment_limit: 500       # refunds only
+    max_calls_per_minute: 50
+    allowed_hours: [8, 22]
+    can_delegate_to: [orchestrator]
+
+global_rules:
+  max_session_duration_minutes: 480
+  require_mfa_for_payment: true
+  alert_on_after_hours: true
+  suspend_on_three_violations: true

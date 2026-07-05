@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "enterprise_sim": "./graph.py:graph"
+  },
+  "env": ".env"
+}
