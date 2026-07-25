@@ -24,12 +24,14 @@ except (AttributeError, ValueError):
     pass
 
 from security_monitor import SecurityMonitor
+from event_logger import EventLogger
 from red_team.scenarios import SCENARIOS
 
 
 def run_suite():
     monitor = SecurityMonitor()
-    results = [s.run(monitor) for s in SCENARIOS]
+    logger = EventLogger()  # logs/tool_calls.jsonl
+    results = [s.run(monitor, logger=logger) for s in SCENARIOS]
 
     print("=" * 100)
     print(f"{'ID':6} {'exp':4} {'det':4} {'status':8} {'rule':7} {'owasp':6} {'ok':3} {'name'}")

@@ -6,3 +6,5 @@ __pycache__/
 checkpoints.sqlite
 checkpoints.sqlite-*
 tool_calls.log
+.vexp/
+logs/

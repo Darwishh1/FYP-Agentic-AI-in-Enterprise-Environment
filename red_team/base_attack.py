@@ -16,7 +16,11 @@ ATLAS is intentionally recorded at the TACTIC level only (e.g. "Privilege
 Escalation"), per the knowledge base's warning not to guess AML.T technique IDs
 from memory — attach a specific technique ID only after checking the live matrix.
 """
+import time
 from dataclasses import dataclass
+
+from logging_schema import ToolCallRecord
+from event_logger import EventLogger
 
 
 @dataclass
@@ -62,9 +66,16 @@ class BaseAttackScenario:
     def build_action(self) -> AgentAction:
         raise NotImplementedError("Each scenario must build its AgentAction.")
 
-    def run(self, monitor) -> AttackResult:
-        """Execute this scenario against the rule-based detection engine."""
+    def run(self, monitor, *, logger: EventLogger | None = None) -> AttackResult:
+        """Execute this scenario against the rule-based detection engine.
+
+        When *logger* is provided (the runner passes one), a labelled
+        ToolCallRecord is emitted so the JSONL corpus contains ground-truth
+        positives and negatives from the red-team suite.
+        """
         action = self.build_action()
+
+        t0 = time.perf_counter()
         check = monitor.enforce_policy(
             agent_role=action.agent_role,
             action_type=action.tool,
@@ -74,9 +85,43 @@ class BaseAttackScenario:
             hour=action.hour,
             call_count=action.call_count,
         )
+        latency_ms = (time.perf_counter() - t0) * 1000
 
         detected = check["status"] != "PASS"       # any finding counts as a flag
         actual_owasp = check.get("owasp_tag")
+
+        # --- emit labelled JSONL record ---
+        if logger is not None:
+            args_dict = {
+                "resource": action.resource,
+                "amount": action.amount,
+                "args_text": action.args_text,
+            }
+            rule_ids = [check["rule_id"]] if check.get("rule_id") else []
+            owasp_tags = [check["owasp_tag"]] if check.get("owasp_tag") else []
+            record = ToolCallRecord(
+                session_id=f"redteam-{self.attack_id}",
+                turn_index=1,
+                timestamp=ToolCallRecord.utcnow_iso(),
+                agent_role=action.agent_role,
+                privilege_level="unknown",
+                delegation_source=None,
+                tool_name=action.tool,
+                args_raw=args_dict,
+                args_hash=ToolCallRecord.args_to_hash(args_dict),
+                schema_accessed=action.resource,
+                result_status="BLOCKED" if check["status"] == "CONTAIN" else "SUCCESS",
+                rows_returned=None,
+                bytes_returned=0,
+                latency_ms=round(latency_ms, 3),
+                policy_status=check["status"],
+                rule_ids=rule_ids,
+                owasp_tags=owasp_tags,
+                is_attack=self.expect_detected,
+                attack_id=self.attack_id,
+            )
+            logger.log(record)
+
         return AttackResult(
             attack_id=self.attack_id,
             name=self.name,

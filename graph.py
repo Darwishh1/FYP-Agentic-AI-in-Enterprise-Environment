@@ -10,6 +10,7 @@ Do NOT fork this logic into another file again. Add nodes/edges here.
 """
 import os
 import sys
+import time
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -20,6 +21,9 @@ from langgraph.graph import StateGraph, START, END
 from state import EnterpriseState
 import mock_tools
 from security_monitor import SecurityMonitor
+from logging_schema import ToolCallRecord
+from event_logger import EventLogger
+from attack_context import get_attack_label
 
 load_dotenv()
 
@@ -35,6 +39,7 @@ MODEL_ID = os.getenv("LLM_MODEL", "gemini-3.1-flash-lite")
 model = ChatGoogleGenerativeAI(model=MODEL_ID, temperature=0)
 
 monitor = SecurityMonitor()
+event_logger = EventLogger()
 
 # Maps a tool name to its mock implementation. The enforcement gate below only
 # ever executes a tool by looking it up here — a single, auditable choke point.
@@ -65,9 +70,12 @@ def guarded_tool_call(
     """Single enforcement point. Increments the session call count, runs the
     rule engine with the FULL context (schema, amount, injected-text, rate, hour),
     then either blocks (CONTAIN) or executes the real tool — annotating WARN/ALERT
-    findings on an allowed call. Returns the message content for the agent node."""
+    findings on an allowed call. Returns the message content for the agent node.
+
+    Emits exactly one ToolCallRecord per call (pass or block) to the JSONL log."""
     ctx["call_count"] = ctx.get("call_count", 0) + 1
     hour = now_hour if now_hour is not None else datetime.now().hour
+    effective_kwargs = tool_kwargs or {}
 
     check = monitor.enforce_policy(
         agent_role=ctx["agent_role"],
@@ -81,6 +89,11 @@ def guarded_tool_call(
 
     tag = f"[{check['rule_id']}/{check['owasp_tag']}]" if check.get("owasp_tag") else ""
 
+    # --- build common record fields ---
+    is_attack, attack_id = get_attack_label()
+    rule_ids = [check["rule_id"]] if check.get("rule_id") else []
+    owasp_tags = [check["owasp_tag"]] if check.get("owasp_tag") else []
+
     if check["status"] == "CONTAIN":
         # Record the blocked attempt so the detection corpus includes the tool
         # never ran (positive-class label), tagged with the rule that caught it.
@@ -89,9 +102,57 @@ def guarded_tool_call(
             {"resource": resource, "amount": amount, "rule": check["rule_id"]},
             "BLOCKED",
         )
+        record = ToolCallRecord(
+            session_id=ctx.get("session_id", "unknown"),
+            turn_index=ctx.get("call_count", 0),
+            timestamp=ToolCallRecord.utcnow_iso(),
+            agent_role=ctx.get("agent_role", "unknown"),
+            privilege_level=ctx.get("privilege_level", "unknown"),
+            delegation_source=ctx.get("delegation_source"),
+            tool_name=tool_name,
+            args_raw=effective_kwargs,
+            args_hash=ToolCallRecord.args_to_hash(effective_kwargs),
+            schema_accessed=resource,
+            result_status="BLOCKED",
+            rows_returned=None,
+            bytes_returned=0,
+            latency_ms=0.0,
+            policy_status=check["status"],
+            rule_ids=rule_ids,
+            owasp_tags=owasp_tags,
+            is_attack=is_attack,
+            attack_id=attack_id,
+        )
+        event_logger.log(record)
         return f"🛑 CONTAIN {tag}: {check['reason']}"
 
-    result = TOOL_REGISTRY[tool_name](**(tool_kwargs or {}), context=ctx)
+    # --- execute the tool and time it ---
+    t0 = time.perf_counter()
+    result = TOOL_REGISTRY[tool_name](**effective_kwargs, context=ctx)
+    latency_ms = (time.perf_counter() - t0) * 1000
+
+    record = ToolCallRecord(
+        session_id=ctx.get("session_id", "unknown"),
+        turn_index=ctx.get("call_count", 0),
+        timestamp=ToolCallRecord.utcnow_iso(),
+        agent_role=ctx.get("agent_role", "unknown"),
+        privilege_level=ctx.get("privilege_level", "unknown"),
+        delegation_source=ctx.get("delegation_source"),
+        tool_name=tool_name,
+        args_raw=effective_kwargs,
+        args_hash=ToolCallRecord.args_to_hash(effective_kwargs),
+        schema_accessed=resource,
+        result_status="SUCCESS",
+        rows_returned=None,
+        bytes_returned=len(result) if isinstance(result, str) else 0,
+        latency_ms=round(latency_ms, 3),
+        policy_status=check["status"],
+        rule_ids=rule_ids,
+        owasp_tags=owasp_tags,
+        is_attack=is_attack,
+        attack_id=attack_id,
+    )
+    event_logger.log(record)
 
     if check["status"] in ("WARN", "ALERT"):
         return f"⚠️ {check['status']} {tag}: {check['reason']}\n{result}"
