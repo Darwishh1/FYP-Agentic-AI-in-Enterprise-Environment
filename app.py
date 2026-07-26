@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from graph import build_graph
+from state import new_context
 
 CHECKPOINT_DB = "checkpoints.sqlite"
 THREAD_ID = "cli-session-1"  # stable id => memory persists across script runs
@@ -52,13 +53,7 @@ if __name__ == "__main__":
             print(f"\n[RESUMING] {len(existing.values['messages'])} messages already in this thread's history.")
         else:
             print("\n[NEW SESSION] No prior checkpoint for this thread_id — starting fresh.")
-            base_context = {
-                "session_id": str(uuid.uuid4()),
-                "agent_role": "orchestrator",
-                "privilege_level": "LOW",
-                "tool_whitelist": ["db_query"],
-                "call_count": 0,
-            }
+            base_context = new_context(session_id=str(uuid.uuid4()))
             print("\n=== Turn 1 ===")
             run_turn(
                 app,

@@ -37,10 +37,15 @@ class SecurityMonitor:
         args_text: str | None = None,
         hour: int | None = None,
         call_count: int | None = None,
+        tool_call_rate: int | None = None,
     ) -> dict:
         """Evaluate one action against policy. Returns the most severe finding as
         {status, reason, owasp_tag, rule_id}. Extra kwargs enable extra rules but
-        are all optional, so existing 3-arg callers keep working."""
+        are all optional, so existing 3-arg callers keep working.
+
+        tool_call_rate: windowed count of calls for (agent, tool) within the
+        sliding window. When provided, RB-004 uses this instead of cumulative
+        call_count."""
         agent_rules = self.policy.get("agents", {}).get(agent_role)
 
         # RB-000: rogue / unknown identity — always the top-priority block.
@@ -80,12 +85,19 @@ class SecurityMonitor:
                 "ASI01", "RB-005",
             ))
 
-        # RB-004: rapid tool cycling above the per-minute cap.
-        if call_count is not None:
-            cap = agent_rules.get("max_calls_per_minute")
-            if cap is not None and call_count > cap:
+        # RB-004: rapid tool cycling within the sliding window.
+        # Resolve cap: per-tool override > per-agent fallback > skip.
+        _rate = tool_call_rate if tool_call_rate is not None else call_count
+        if _rate is not None:
+            per_tool = agent_rules.get("tool_rate_limits", {}).get(action_type)
+            per_agent = agent_rules.get("max_calls_per_minute")
+            cap = per_tool if per_tool is not None else per_agent
+            window = self.policy.get("global_rules", {}).get("window_seconds", 60)
+            if cap is not None and _rate > cap:
                 findings.append(self._finding(
-                    "ALERT", f"Call rate {call_count} exceeds {agent_role} cap of {cap}/min.",
+                    "ALERT",
+                    f"Call rate {_rate} for tool '{action_type}' exceeds "
+                    f"{agent_role} cap of {cap} per {window}s.",
                     "ASI02", "RB-004",
                 ))
 

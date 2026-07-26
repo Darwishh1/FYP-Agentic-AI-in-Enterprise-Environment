@@ -1,20 +1,36 @@
 """
 Mock enterprise tool APIs for the simulation.
 
-Each tool is a stand-in for a real backend (DB, mailer, shell, payments, files,
-CRM). They carry lightweight built-in safety checks — the kind a real API has —
-while the policy-level governance lives separately in security_monitor.py.
+CHANGED: tools now return a ToolResult, not a bare string.
 
-Every call emits a structured line to tool_calls.log via log_event(). That log is
-the training/eval corpus for the anomaly-detection layers (Isolation Forest,
-LSTM) added later — do not remove the logging.
+Why: the detection layers consume `rows_returned` and `bytes_returned`. Under the
+old interface `bytes_returned` was `len(result)`, i.e. the length of an f-string
+template, and `rows_returned` was hardcoded None. An Isolation Forest trained on
+those columns learns the length of a Python format string. Exfiltration detection
+needs volume that actually tracks what was requested, so volume is now derived
+deterministically from the arguments (same args => same volume, reproducible
+across runs, but varying across different requests).
+
+REMOVED: log_event(). Logging now happens once, in guarded_tool_call, via
+EventLogger. Previously this module wrote a second, differently-shaped log to
+tool_calls.log while graph.py wrote ToolCallRecords to logs/tool_calls.jsonl,
+giving two corpora that disagreed with each other.
 """
-import hashlib
-import json
-import re
-from datetime import datetime, timezone
+from __future__ import annotations
 
-LOG_PATH = "tool_calls.log"
+import hashlib
+import re
+from dataclasses import dataclass
+
+
+@dataclass
+class ToolResult:
+    """What a mock backend returns. The gate reads volume off this."""
+    message: str
+    rows: int | None = None
+    bytes: int = 0
+    status: str = "SUCCESS"      # SUCCESS | DENIED | ERROR
+
 
 # Commands the sandboxed shell is allowed to run.
 _SHELL_WHITELIST = ["git", "docker", "kubectl", "pip", "npm"]
@@ -22,102 +38,104 @@ _SHELL_WHITELIST = ["git", "docker", "kubectl", "pip", "npm"]
 _SHELL_NETWORK_PATTERNS = ("curl", "wget", "nc ", "ncat", "python -c")
 
 
-def log_event(tool_name: str, context: dict, args: dict, result_status: str) -> dict:
-    """Append one structured tool-call record to LOG_PATH and return it.
+def _deterministic_scale(seed_text: str, lo: int, hi: int) -> int:
+    """Stable pseudo-random integer in [lo, hi] derived from the arguments.
 
-    result_status is one of: SUCCESS | DENIED | ERROR.
-    args are hashed (not stored raw) so the log stays PII-light.
+    Deterministic on purpose: rerunning the same evaluation must produce the
+    same corpus, otherwise detection-rate numbers move between runs for reasons
+    that have nothing to do with the detector.
     """
-    ctx = context if isinstance(context, dict) else {}
-    args_repr = json.dumps(args, sort_keys=True, default=str)
-    entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "session_id": ctx.get("session_id", "unknown"),
-        "agent_role": ctx.get("agent_role", "unknown"),
-        "tool_name": tool_name,
-        "args_hash": hashlib.sha256(args_repr.encode()).hexdigest()[:16],
-        "result_status": result_status,
-    }
-    with open(LOG_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
-    return entry
+    digest = hashlib.sha256(seed_text.encode()).digest()
+    span = max(hi - lo, 1)
+    return lo + (int.from_bytes(digest[:4], "big") % span)
 
 
-def db_query(schema: str, query: str, context: dict) -> str:
-    """Simulated DB query with basic schema-isolation checking."""
+# Rough per-schema row scale, so a `SELECT *` against a big table returns more
+# than one against a small one. Crude, but it makes volume mean something.
+_SCHEMA_SCALE = {
+    "hr": (1, 400), "finance": (1, 900), "accounts": (1, 600),
+    "devops": (1, 1500), "logs": (1, 5000), "crm": (1, 300), "tickets": (1, 800),
+}
+_BYTES_PER_ROW = 180
+
+
+def db_query(schema: str, query: str, context: dict) -> ToolResult:
+    """Simulated DB query. Row count scales with the schema and the query shape."""
     role = context.get("agent_role")
 
     if role == "customer_service_agent" and schema == "hr":
-        log_event("db_query", context, {"schema": schema, "query": query}, "DENIED")
-        return "ERROR: Access Denied. Privilege level insufficient for HR schema."
+        return ToolResult("ERROR: Access Denied. Privilege insufficient for HR schema.",
+                          rows=0, bytes=0, status="DENIED")
 
-    log_event("db_query", context, {"schema": schema, "query": query}, "SUCCESS")
-    return f"Mock data for query '{query}' on schema '{schema}' fetched successfully."
+    lo, hi = _SCHEMA_SCALE.get(schema, (1, 200))
+    rows = _deterministic_scale(f"{schema}|{query}", lo, hi)
+
+    # An unbounded SELECT * pulls the whole table; a LIMIT clause caps it.
+    if re.search(r"select\s+\*", query or "", re.IGNORECASE) and not re.search(r"\blimit\b", query or "", re.IGNORECASE):
+        rows = hi
+    limit_match = re.search(r"\blimit\s+(\d+)", query or "", re.IGNORECASE)
+    if limit_match:
+        rows = min(rows, int(limit_match.group(1)))
+
+    return ToolResult(f"Returned {rows} rows from '{schema}'.", rows=rows, bytes=rows * _BYTES_PER_ROW)
 
 
-def execute_shell(command: str, context: dict) -> str:
+def execute_shell(command: str, context: dict) -> ToolResult:
     """Sandboxed shell simulation with command whitelisting + network block."""
     base_cmd = command.split()[0] if command else ""
 
     if base_cmd not in _SHELL_WHITELIST:
-        log_event("execute_shell", context, {"command": command}, "DENIED")
-        return f"ERROR: Command '{base_cmd}' is blocked by system execution policy."
-
+        return ToolResult(f"ERROR: Command '{base_cmd}' blocked by execution policy.",
+                          rows=0, bytes=0, status="DENIED")
     if any(pat in command for pat in _SHELL_NETWORK_PATTERNS):
-        log_event("execute_shell", context, {"command": command}, "DENIED")
-        return "ERROR: Network-reaching command blocked by sandbox policy."
+        return ToolResult("ERROR: Network-reaching command blocked by sandbox policy.",
+                          rows=0, bytes=0, status="DENIED")
 
-    log_event("execute_shell", context, {"command": command}, "SUCCESS")
-    return f"Execution output: {command} completed with exit code 0."
+    out_bytes = _deterministic_scale(command, 200, 40_000)
+    return ToolResult(f"Exit 0. {out_bytes} bytes of output.", rows=None, bytes=out_bytes)
 
 
-def send_email(to: str, subject: str, body: str, context: dict) -> str:
+def send_email(to: str, subject: str, body: str, context: dict) -> ToolResult:
     """Logs an outbound email to the simulation inbox (never actually sends)."""
-    log_event("send_email", context, {"to": to, "subject": subject}, "SUCCESS")
-    return f"Mock email queued to '{to}' with subject '{subject}'."
+    payload = len((body or "").encode()) + len((subject or "").encode()) + len((to or "").encode())
+    return ToolResult(f"Email queued to '{to}' ({payload} bytes).", rows=None, bytes=payload)
 
 
-def call_payment_api(amount: float, recipient: str, context: dict) -> str:
-    """Mock payment. Built-in sanity check only; role-based payment limits are
-    enforced by the policy layer (security_monitor), not here."""
+def call_payment_api(amount: float, recipient: str, context: dict) -> ToolResult:
+    """Mock payment. Sanity check only; role limits live in security_monitor."""
     if amount is None or amount <= 0:
-        log_event("call_payment_api", context, {"amount": amount, "recipient": recipient}, "ERROR")
-        return "ERROR: Payment amount must be a positive number."
-
-    log_event("call_payment_api", context, {"amount": amount, "recipient": recipient}, "SUCCESS")
-    return f"Mock payment of {amount} to '{recipient}' authorized."
+        return ToolResult("ERROR: Payment amount must be positive.", rows=0, bytes=0, status="ERROR")
+    return ToolResult(f"Payment of {amount} to '{recipient}' authorized.", rows=1, bytes=320)
 
 
-def read_file(path: str, context: dict) -> str:
+def read_file(path: str, context: dict) -> ToolResult:
     """Simulated filesystem read with a naive path-traversal guard."""
     if ".." in path or path.startswith("/etc") or path.startswith("C:\\Windows"):
-        log_event("read_file", context, {"path": path}, "DENIED")
-        return f"ERROR: Access to path '{path}' blocked by filesystem ACL."
+        return ToolResult(f"ERROR: Access to '{path}' blocked by filesystem ACL.",
+                          rows=0, bytes=0, status="DENIED")
+    size = _deterministic_scale(path, 500, 250_000)
+    return ToolResult(f"Read {size} bytes from '{path}'.", rows=None, bytes=size)
 
-    log_event("read_file", context, {"path": path}, "SUCCESS")
-    return f"Mock contents of '{path}' returned."
 
-
-def write_file(path: str, content: str, context: dict) -> str:
+def write_file(path: str, content: str, context: dict) -> ToolResult:
     """Simulated filesystem write with the same path guard as read_file."""
     if ".." in path or path.startswith("/etc") or path.startswith("C:\\Windows"):
-        log_event("write_file", context, {"path": path}, "DENIED")
-        return f"ERROR: Write to path '{path}' blocked by filesystem ACL."
+        return ToolResult(f"ERROR: Write to '{path}' blocked by filesystem ACL.",
+                          rows=0, bytes=0, status="DENIED")
+    size = len((content or "").encode())
+    return ToolResult(f"Wrote {size} bytes to '{path}'.", rows=None, bytes=size)
 
-    log_event("write_file", context, {"path": path, "bytes": len(content or "")}, "SUCCESS")
-    return f"Mock write of {len(content or '')} bytes to '{path}' succeeded."
 
-
-def create_ticket(ticket_type: str, details: str, context: dict) -> str:
+def create_ticket(ticket_type: str, details: str, context: dict) -> ToolResult:
     """Creates a mock CRM ticket."""
-    log_event("create_ticket", context, {"type": ticket_type}, "SUCCESS")
-    return f"Mock ticket of type '{ticket_type}' created."
+    return ToolResult(f"Ticket of type '{ticket_type}' created.",
+                      rows=1, bytes=len((details or "").encode()) + 128)
 
 
-def escalate_to_human(reason: str, context: dict) -> str:
-    """Triggers the supervisor gate (human-in-the-loop). Mock: just records it."""
-    log_event("escalate_to_human", context, {"reason": reason}, "SUCCESS")
-    return f"Escalated to human supervisor. Reason: {reason}"
+def escalate_to_human(reason: str, context: dict) -> ToolResult:
+    """Triggers the supervisor gate (human-in-the-loop). Mock: records it."""
+    return ToolResult(f"Escalated to human supervisor. Reason: {reason}",
+                      rows=None, bytes=len((reason or "").encode()))
 
 
 def contains_instruction_pattern(text: str) -> bool:
