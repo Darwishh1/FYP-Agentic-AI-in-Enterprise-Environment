@@ -15,9 +15,20 @@ import {
 
 /* ============================================================================
    SEED_DATA — hand-editable. Every task label is plain text only.
+
+   Edit this file, never 'build tracker.html' — that one is generated from here by
+   build_tracker_html.py. Bump seedVersion below so a live board picks the edit up
+   instead of ignoring it, then rebuild:  python build_tracker_html.py
    ==========================================================================*/
 
 const SEED_DATA = {
+  // Bump this whenever you hand-edit SEED_DATA. On hydrate, a stored board with a
+  // different seedVersion is merged against the seed rather than ignored: labels and
+  // inferred flags come from the seed, status and note stay yours. Without this, editing
+  // the seed did nothing to an already-hydrated board and the only way to pick up an edit
+  // was WIPE AND RESEED, which threw away every note.
+  seedVersion: 4,
+
   phases: [
     {
       id: "P0",
@@ -35,7 +46,7 @@ const SEED_DATA = {
     {
       id: "P1",
       name: "Enterprise Simulation",
-      blurb: "4 agent roles, session state, logging, checkpointing",
+      blurb: "4 agent roles, planner layer, delegation, logging, checkpointing",
       deps: ["P0"],
       tasks: [
         { id: "p1-1", label: "Build the four agent nodes: hr, finance, devops, customer_service", status: "done", note: "", inferred: false },
@@ -44,20 +55,24 @@ const SEED_DATA = {
         { id: "p1-4", label: "Append every record to a JSONL corpus with a replay loader", status: "done", note: "EventLogger writes logs/tool_calls.jsonl and exposes load_all().", inferred: false },
         { id: "p1-5", label: "Persist sessions with an on-disk checkpointer on a stable thread id", status: "done", note: "SqliteSaver + THREAD_ID cli-session-1, so re-running app.py resumes.", inferred: false },
         { id: "p1-6", label: "Ship the narrated console demo over the rule engine", status: "done", note: "demo.py runs scenarios from the red-team classes through enforce_policy and prints a verdict block plus a summary table.", inferred: false },
+        { id: "p1-7", label: "Split the agent decision layer out behind a Planner protocol", status: "done", note: "Was missing from the board entirely. agent_runtime.py defines a Planner protocol with two interchangeable implementations: ScriptedPlanner (seeded random.Random, per-role weighted _WORKLOAD, free and deterministic) and LLMPlanner (JSON-only output contract, validates tool name and delegation target, degrades to finish on any exception). Selected by the PLANNER_MODE env var, scripted by default.", inferred: false },
+        { id: "p1-8", label: "Make delegation a real graph edge rather than a logged field", status: "done", note: "Also missing from the board. graph.py has agent-to-agent conditional edges, state.py carries delegation_path and delegation_depth, and a steps_remaining budget bounds the run. Note this is the mechanism only. Whether a delegation is permitted is still unchecked, which is task p4-6.", inferred: false },
+        { id: "p1-9", label: "Keep the LLM planner free of safety prompting", status: "done", note: "My addition, but it is a deliberate choice already visible in agent_runtime.py. The planner is not told to behave, so what gets measured is the monitor rather than the base model's own reluctance. This is the same argument as the no-monitor baseline in p7-5, and the two need to stay consistent.", inferred: true },
       ],
     },
     {
       id: "P2",
       name: "Detection Engine v1",
-      blurb: "Rule layer done. Isolation Forest not started.",
+      blurb: "Rule layer and corpus done. Isolation Forest not started.",
       deps: ["P1"],
       tasks: [
         { id: "p2-1", label: "Build the rule engine with RB-000 through RB-006", status: "done", note: "Counted 7 rules in security_monitor.py: RB-000 rogue identity, RB-001 schema, RB-002 tool whitelist, RB-003 payment, RB-004 rate, RB-005 injected instructions, RB-006 after-hours high privilege.", inferred: false },
         { id: "p2-2", label: "Return the most severe finding under WARN / ALERT / CONTAIN tiers", status: "done", note: "Only CONTAIN blocks. WARN and ALERT annotate an allowed call.", inferred: false },
         { id: "p2-3", label: "Build the Isolation Forest layer as its own module", status: "todo", note: "", inferred: false },
         { id: "p2-4", label: "Engineer the 8 feature vector fields out of ToolCallRecord", status: "todo", note: "", inferred: false },
-        { id: "p2-5", label: "Generate a normal-operation corpus large enough to fit on", status: "todo", note: "The only corpus that exists today is whatever demo.py and the red-team runner have appended, which is attack-heavy and tiny.", inferred: false },
-        { id: "p2-6", label: "Establish the Isolation Forest baseline false positive rate", status: "todo", note: "", inferred: false },
+        { id: "p2-5", label: "Generate a normal-operation corpus large enough to fit on", status: "done", note: "Board was stale here. normal_traffic.py exists and has been run: logs/tool_calls_calibration.jsonl holds 3941 records and logs/tool_calls_holdout.jsonl holds 3975, all is_attack false. Calibration and holdout are exactly the split the Isolation Forest needs, so p2-3 is no longer blocked on data.", inferred: false },
+        { id: "p2-8", label: "Write down the measured benign false positive rate of the rule engine", status: "todo", note: "normal_traffic.py prints overall, per-role, per-rule and per-severity FPR, but the number is not recorded anywhere, so no document can cite it. Run it and commit the output. If it comes back exactly 0.0, treat that as a warning rather than a result: it would suggest the workload generator was implicitly shaped by the ruleset it is meant to be independent of. normal_traffic.py already prints a warning in that case.", inferred: false },
+        { id: "p2-6", label: "Establish the Isolation Forest baseline false positive rate", status: "todo", note: "Distinct from p2-8. That one measures the rule engine, this one measures the statistical layer, and the comparison between them is the point.", inferred: false },
         { id: "p2-7", label: "Move contains_instruction_pattern out of mock_tools into the detection package", status: "todo", note: "Evidenced: security_monitor.py imports contains_instruction_pattern from mock_tools, so the rule engine depends on the tool mocks. The judgement that this is worth untangling is mine, not the repo's.", inferred: true },
       ],
     },
@@ -86,7 +101,8 @@ const SEED_DATA = {
         { id: "p4-3", label: "Migrate the enforcement hardcoded in mock_tools into the policy file", status: "todo", note: "Shell whitelist, network pattern block and path-traversal guards. Discrepancy worth recording: the policy file already declares shell_whitelist for devops_agent, but no rule in the rule engine ever reads it, so that key is currently decorative.", inferred: false },
         { id: "p4-4", label: "Build the policy linter for dead rules, conflicts, escalation paths and schema", status: "todo", note: "", inferred: false },
         { id: "p4-5", label: "Reconcile the live policy file against the design doc policy schema", status: "todo", note: "The live file adds privilege_level per agent; the documented schema omits it. RB-006 reads that key, so the doc is the one that is wrong.", inferred: false },
-        { id: "p4-6", label: "Enforce can_delegate_to and cap delegation depth", status: "todo", note: "can_delegate_to is declared for all four agents and read by nothing. delegation_source is logged but never checked.", inferred: false },
+        { id: "p4-6", label: "Enforce can_delegate_to as a rule in the rule engine", status: "todo", note: "Split from the old combined task, because half of it turned out to be done. Still open: can_delegate_to is declared for all four agents in policy.yaml and read by nothing, and delegation_source is logged but never checked. This wants to be an actual RB rule so that a refused delegation produces a finding and a record, rather than being silently clamped.", inferred: false },
+        { id: "p4-7", label: "Cap delegation depth", status: "done", note: "Other half of the old p4-6. MAX_DELEGATION_DEPTH is 3 and is enforced in agent_runtime.py when the planner validates a delegate plan. Caveat worth keeping in view: the cap lives in the planner, not in the policy file and not in the rule engine, so a planner that ignored it would not be caught by the monitor.", inferred: false },
       ],
     },
     {
@@ -97,9 +113,9 @@ const SEED_DATA = {
       tasks: [
         { id: "p5-1", label: "Build the scenario base class, action record and result record", status: "done", note: "", inferred: false },
         { id: "p5-2", label: "Run the whole suite and print a per-scenario verdict table", status: "done", note: "", inferred: false },
-        { id: "p5-3", label: "Add an end-to-end path that runs through the real graph and LLM", status: "todo", note: "Confirmed in the code comments: scenarios target the detection engine directly and never touch the orchestrator. Prompt-injection results scored only against the contains_instruction_pattern regex are not defensible.", inferred: false },
-        { id: "p5-4", label: "Wire the attack label into the end-to-end path, or delete the module", status: "todo", note: "Confirmed: set_attack_label is never called anywhere. graph.py imports get_attack_label only, so is_attack is always false outside the red-team classes.", inferred: false },
-        { id: "p5-5", label: "Stop deriving the ground-truth label from the expectation flag", status: "todo", note: "In base_attack.py the record sets is_attack from expect_detected. Those are two different things: one is what the input is, the other is what the monitor should say about it. They agree today only because no scenario is an attack that is expected to slip through.", inferred: true },
+        { id: "p5-3", label: "Add an end-to-end path that runs through the real graph and LLM", status: "todo", note: "Confirmed in the code comments: scenarios target the detection engine directly and never touch the orchestrator. Prompt-injection results scored only against the contains_instruction_pattern regex are not defensible. Now the critical path rather than one item among eight. Three separate things are already built and waiting on it: the ground-truth label plumbing reads a contextvar guarded_tool_call already honours, the no-monitor baseline in p7-5 cannot measure anything until the LLM is back in the path, and RB-005 needs to be scored against something other than the regex that defines it. Nothing downstream of this produces a defensible number until it lands.", inferred: false, pinned: true },
+        { id: "p5-4", label: "Wire the attack label into the end-to-end path, or delete the module", status: "done", note: "Kept, not deleted. attack_context now exposes an attack_label context manager that resets via contextvar tokens instead of clearing to the default, and base_attack.run wraps the whole execution in it and reads the label back out for the record. Today only enforce_policy is inside that scope, but guarded_tool_call already reads the same contextvar, so when p5-3 routes scenarios through the real graph the labelling needs no further wiring. Covered by tests/test_enforcement_gate.py.", inferred: false },
+        { id: "p5-5", label: "Stop deriving the ground-truth label from the expectation flag", status: "done", note: "is_attack and expect_detected are now separate fields, declared explicitly on every scenario, and a test fails if either is left to inherit. Metrics and the JSONL record both partition on is_attack. The output is unchanged today, exactly as predicted, because the two agreed. What changed is that a missed attack is now expressible: tests/test_ground_truth.py builds one and asserts that partitioning on the expectation instead would report 100 percent where the truth is 50.", inferred: true },
         { id: "p5-6", label: "Reconcile rule ids between the rule engine and the design doc", status: "todo", note: "Code has RB-000 rogue identity and defines RB-002 as tool whitelist. The doc has no RB-000 and defines RB-002 as shell exec with network reach. Confirmed on both sides.", inferred: false },
         { id: "p5-7", label: "Reconcile OWASP tags between the scenario classes and the design doc", status: "todo", note: "Discrepancy found while reading, not in the seed: the code tags D-001 as ASI02, the doc maps D-001 to ASI05 Unexpected Code Execution. F-002 is ASI10 in code but listed under both ASI07 and ASI10 in the doc.", inferred: false },
         { id: "p5-8", label: "Split the scenario file into a package, one file per OWASP category", status: "todo", note: "", inferred: false },
@@ -128,7 +144,7 @@ const SEED_DATA = {
         { id: "p7-2", label: "Break coverage down per OWASP category across attack scenarios", status: "done", note: "", inferred: false },
         { id: "p7-3", label: "Extract the inline metrics from the runner into an evaluation module", status: "todo", note: "", inferred: false },
         { id: "p7-4", label: "Add precision, recall and F1 alongside detection rate", status: "todo", note: "None of the three exist today. With 6 attacks and 2 benign controls the denominators are too small to report anyway.", inferred: false },
-        { id: "p7-5", label: "Run a no-monitor baseline to measure marginal detection contribution", status: "todo", note: "Without this the headline number is unfalsifiable: any refusal the base model produces on its own currently counts as the monitor working.", inferred: false },
+        { id: "p7-5", label: "Run a no-monitor baseline to measure marginal detection contribution", status: "blocked", note: "Harness built and running: red_team/baseline.py runs the suite twice, control against a NullMonitor and treatment against the real one, and prints both columns with the delta. run_suite now takes an injected monitor, and the control run is not logged so it cannot contaminate the training corpus. Blocked, not done, and this is the finding: the measured baseline is 0.0 percent, but that is a property of the harness rather than a result. Scenarios call enforce_policy directly and never touch the orchestrator, so with the rule engine disabled nothing in the path can refuse anything, and the delta is just the detection rate restated. Quoting it as a 100 percent marginal contribution would be circular. It becomes a real experiment the moment p5-3 puts the LLM back in the path, which is why this now depends on p5-3. The module prints that caveat itself so the number cannot be lifted out of context.", inferred: false },
         { id: "p7-6", label: "Build the AgentDojo adapter", status: "todo", note: "", inferred: false },
         { id: "p7-7", label: "Build the Agent Security Bench adapter", status: "todo", note: "", inferred: false },
         { id: "p7-8", label: "Run Promptfoo and DeepTeam over the same scenarios and build the comparison matrix", status: "todo", note: "", inferred: false },
@@ -153,7 +169,7 @@ const SEED_DATA = {
       blurb: "eval tables, figures, seed-locked repro scripts",
       deps: ["P8"],
       tasks: [
-        { id: "p9-1", label: "Add a test suite with coverage on the rule engine and the enforcement gate", status: "todo", note: "No tests directory exists. Every RB rule is currently verified by eyeballing demo output.", inferred: false },
+        { id: "p9-1", label: "Add a test suite with coverage on the rule engine and the enforcement gate", status: "done", note: "57 tests in tests/, run with pytest -q. Pass case and trip case for every rule RB-000 to RB-006, plus boundary cases that aggregate metrics would hide: the RB-003 limit is inclusive, the RB-006 hour window is half-open, and the RB-004 per-tool cap must beat the per-agent fallback. Gate tests assert the contract that matters most, exactly one record per call whether passed or blocked, and that a CONTAIN really does stop the tool running. Rules are tested against a fixture policy rather than the live policy.yaml, so tuning payment limits while calibrating FPR cannot silently weaken a test. Checked by mutation rather than assumed: seven deliberate breaks to security_monitor.py, including the RB-003 boundary flip and inverting RB-005, were all caught. pytest 9.1.1 pinned in requirements.txt.", inferred: false },
         { id: "p9-2", label: "Write seed-locked repro scripts so every number regenerates from a clean checkout", status: "todo", note: "", inferred: false },
         { id: "p9-3", label: "Pin dependency versions and record the model id used for each run", status: "todo", note: "The model id is read from an env var with a default, so a run is not currently self-describing.", inferred: false },
         { id: "p9-4", label: "Generate the eval tables from the JSONL corpus rather than by hand", status: "todo", note: "", inferred: false },
@@ -186,6 +202,7 @@ const SEED_DATA = {
     { id: "kb-8", label: "Cross-check every AML.T identifier against the live MITRE ATLAS matrix", status: "todo", note: "The code records tactic level only and says so explicitly, which is the correct conservative choice. The doc is where the loose technique ids live, including one row that already carries a confirm-the-name warning.", inferred: false },
     { id: "kb-9", label: "Verify the ATLAS tactic and technique counts before quoting them", status: "todo", note: "Two documents in the project both quote roughly 16 tactics and 84 techniques. They agree with each other, which is not the same as being right.", inferred: false },
     { id: "kb-10", label: "Re-pull live pricing from all three providers before any cost figure ships", status: "todo", note: "", inferred: false },
+    { id: "kb-11", label: "Keep the standalone HTML tracker generated from the JSX, never hand-edited", status: "done", note: "There were two copies of this board: this file, and 'build tracker.html', which embeds the same app inside a script type=text/babel block with React, Babel and Tailwind inlined so it runs offline. They were maintained by hand in parallel, which is the same failure as the old graph.py fork that p0-2 fixed. build_tracker_html.py now generates the HTML from this file and takes --check for CI. It was validated by regenerating the pre-existing HTML from the pre-existing JSX and confirming a byte-for-byte match before any new content went in. tests/test_tracker_sync.py fails if the two drift in either direction, and was itself checked by editing each side in turn and confirming it caught both.", inferred: false },
   ],
 
   collapsed: { P0: true, P1: true },
@@ -297,6 +314,79 @@ const uid = () => "u" + Math.random().toString(36).slice(2, 9);
 
 const STORAGE_KEY = "fyp_tracker_state";
 
+/* Merge one task list.
+
+   Precedence, and the reasoning, because this is the one decision in the file that
+   can lose work: the seed wins on label, inferred AND status. The stored board wins
+   on note. A seedVersion bump is a deliberate act by the same person who clicks the
+   status dots, and the usual reason to bump is that a status in the seed was wrong,
+   so a merge that preserved stored status would refuse to deliver the correction it
+   was written for. Notes are the expensive artifact, they are typed prose that exists
+   nowhere else, so they are never overwritten.
+
+   The cost: a status you cycled in the UI since the last bump is reverted to whatever
+   the seed says. Keep the seed honest and bump deliberately. Tasks you added in the UI
+   have uid ids the seed will never contain, so they survive untouched at the tail. */
+const mergeTasks = (seedTasks, storedTasks) => {
+  const stored = new Map((storedTasks || []).map((t) => [t.id, t]));
+  const merged = seedTasks.map((s) => {
+    const prev = stored.get(s.id);
+    stored.delete(s.id);
+    // No stored counterpart means this task is new in the seed. Take it whole.
+    if (!prev) return { ...s };
+    // Keep a note the seed does not supply. If both have one, the seed's is the
+    // considered version, so it wins and the typed one is appended rather than lost.
+    let note = s.note;
+    if (prev.note && prev.note !== s.note) note = s.note ? s.note + "\n\n---\n" + prev.note : prev.note;
+    return { ...s, note };
+  });
+  // Whatever is left in `stored` was added in the UI. Keep it, at the end.
+  return merged.concat(Array.from(stored.values()));
+};
+
+/* Reconcile a stored board against the seed. Only runs when seedVersion moved,
+   so the normal path stays a plain read. */
+const mergeBoard = (seed, stored) => {
+  const storedPhases = new Map((stored.phases || []).map((p) => [p.id, p]));
+  const phases = seed.phases.map((sp) => {
+    const prev = storedPhases.get(sp.id);
+    storedPhases.delete(sp.id);
+    return { ...sp, tasks: mergeTasks(sp.tasks, prev ? prev.tasks : []) };
+  });
+  phases.push(...Array.from(storedPhases.values()));
+
+  const storedCounters = new Map((stored.counters || []).map((c) => [c.id, c]));
+  const counters = seed.counters.map((sc) => {
+    const prev = storedCounters.get(sc.id);
+    storedCounters.delete(sc.id);
+    // Counters are hand-tallied, so the stored numbers are the real ones.
+    if (!prev) return { ...sc };
+    return { ...sc, done: prev.done, target: prev.target };
+  });
+  counters.push(...Array.from(storedCounters.values()));
+
+  const hygiene = mergeTasks(seed.hygiene, stored.hygiene);
+
+  // Drop cleared entries whose task no longer exists, and refresh the rest so a
+  // relabelled task does not show its old wording in the cleared panel.
+  const labels = new Map();
+  phases.forEach((p) => p.tasks.forEach((t) => labels.set(t.id, t.label)));
+  hygiene.forEach((t) => labels.set(t.id, t.label));
+  const cleared = (stored.cleared || [])
+    .filter((c) => labels.has(c.id))
+    .map((c) => ({ id: c.id, label: labels.get(c.id) }));
+
+  return {
+    seedVersion: seed.seedVersion,
+    phases,
+    counters,
+    hygiene,
+    collapsed: stored.collapsed || seed.collapsed,
+    unlocked: stored.unlocked || [],
+    cleared,
+  };
+};
+
 /* ============================================================================
    Component
    ==========================================================================*/
@@ -323,14 +413,24 @@ export default function FypBuildTracker() {
     (async () => {
       let next = null;
       try {
+        // window.storage only exists in the Claude artifact host. Anywhere else this
+        // throws, the board falls back to the seed, and the persist effect below will
+        // surface loadError. The board is then ephemeral for that session.
         const res = await window.storage.get(STORAGE_KEY);
         if (res && res.value) next = JSON.parse(res.value);
       } catch (err) {
-        // Reading a key that was never written throws. That is the first-run path.
+        // Reading a key that was never written also throws. That is the first-run path.
         next = null;
       }
       if (!alive) return;
-      setBoard(next && next.phases ? next : SEED_DATA);
+      if (!next || !next.phases) {
+        setBoard(structuredClone(SEED_DATA));
+      } else if (next.seedVersion !== SEED_DATA.seedVersion) {
+        // Seed moved under a live board. Merge instead of discarding either side.
+        setBoard(mergeBoard(SEED_DATA, next));
+      } else {
+        setBoard(next);
+      }
       setHydrated(true);
     })();
     return () => {
@@ -407,18 +507,31 @@ export default function FypBuildTracker() {
     });
   };
 
+  /* Pinned tasks jump the queue from anywhere on the board.
+     Needed because phase order is not the same as build order. The dependency graph
+     says P2 is next, but the tasks that actually gate everything downstream sit in P5,
+     P7 and P9: if ground truth and the no-monitor baseline are wrong, every number a
+     later phase produces has to be regenerated. Without a pin there is no way to say
+     that on a board whose focus is "first partially complete phase". */
   const nextActions = useMemo(() => {
-    if (!board || !focusPhaseId) return [];
-    const idx = board.phases.findIndex((p) => p.id === focusPhaseId);
-    const pool = [board.phases[idx], board.phases[idx + 1]].filter(Boolean);
+    if (!board) return [];
     const out = [];
-    ["active", "todo"].forEach((st) => {
-      pool.forEach((p) =>
-        p.tasks.forEach((t) => {
-          if (t.status === st && out.length < 8) out.push({ phase: p.id, task: t });
-        })
+    const seen = new Set();
+    const push = (p, t) => {
+      if (seen.has(t.id) || t.status === "done" || t.status === "blocked") return;
+      seen.add(t.id);
+      out.push({ phase: p.id, task: t });
+    };
+
+    board.phases.forEach((p) => p.tasks.forEach((t) => t.pinned && push(p, t)));
+
+    if (focusPhaseId) {
+      const idx = board.phases.findIndex((p) => p.id === focusPhaseId);
+      const pool = [board.phases[idx], board.phases[idx + 1]].filter(Boolean);
+      ["active", "todo"].forEach((st) =>
+        pool.forEach((p) => p.tasks.forEach((t) => t.status === st && push(p, t)))
       );
-    });
+    }
     return out.slice(0, 3);
   }, [board, focusPhaseId]);
 
@@ -606,6 +719,7 @@ export default function FypBuildTracker() {
             )}
             <div className="mt-1 flex flex-wrap items-center gap-3">
               <span className={"font-mono text-xs " + meta.text}>{meta.label}</span>
+              {t.pinned ? <span className="font-mono text-xs text-amber-400">pinned, blocks later phases</span> : null}
               {t.inferred ? <span className="font-mono text-xs text-violet-400">inferred, check this</span> : null}
               <button
                 onClick={() => setOpenNote(noteOpen ? null : t.id)}
@@ -768,7 +882,12 @@ export default function FypBuildTracker() {
               <ol className="space-y-2">
                 {nextActions.map((n, i) => (
                   <li key={n.task.id} className="flex gap-3">
-                    <span className="font-mono text-xs text-cyan-400">{n.phase}</span>
+                    <span
+                      className={"font-mono text-xs " + (n.task.pinned ? "text-amber-400" : "text-cyan-400")}
+                      title={n.task.pinned ? "Pinned. Out of phase order on purpose." : ""}
+                    >
+                      {n.phase}
+                    </span>
                     <span className="text-sm leading-snug text-neutral-300">{renderLabel(n.task.label, "next" + i)}</span>
                   </li>
                 ))}
@@ -932,6 +1051,7 @@ export default function FypBuildTracker() {
 
         <p className="mt-8 font-mono text-xs text-neutral-700">
           Dotted underline means the word is in the glossary. Dashed border means I inferred it and you should check it.
+          Pinned means it jumps the queue regardless of phase order, because something later depends on it being right.
         </p>
       </div>
 
