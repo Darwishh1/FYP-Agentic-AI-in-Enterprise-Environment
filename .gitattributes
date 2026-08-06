@@ -1,7 +1,4 @@
 # core.autocrlf is true on this machine, so text files are checked out as CRLF.
-# 'build tracker.html' is generated from fyp_build_tracker.jsx by build_tracker_html.py,
-# and tests/test_tracker_sync.py compares the two by raw bytes. Without pinning these to
-# LF, a fresh clone on Windows checks them out as CRLF, the generator rewrites them as LF,
-# and test_generator_is_idempotent fails on a clean checkout for no real reason.
-*.jsx   text eol=lf
+# 'build tracker.html' is the build tracker itself and is hand-edited, so pin it to LF
+# to keep its diffs readable rather than having every line flip on checkout.
 *.html  text eol=lf

@@ -1337,9 +1337,15 @@ const BookOpen = mkIcon(["M12 7v14", "M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 
 /* ============================================================================
    SEED_DATA — hand-editable. Every task label is plain text only.
 
-   Edit this file, never 'build tracker.html' — that one is generated from here by
-   build_tracker_html.py. Bump seedVersion below so a live board picks the edit up
-   instead of ignoring it, then rebuild:  python build_tracker_html.py
+   THIS FILE IS THE BOARD. Edit it directly. There is no build step and no source
+   file above it — fyp_build_tracker.jsx and build_tracker_html.py were deleted,
+   because two copies of the same board is what let it drift out of date before.
+
+   Bump seedVersion below whenever you edit SEED_DATA, or a browser that has already
+   saved a board will keep showing the old one.
+
+   Everything above this comment is the offline shell: React, Babel and Tailwind
+   inlined, a localStorage shim, and hand-rolled icons. Leave it alone.
    ==========================================================================*/
 
 const SEED_DATA = {
@@ -1348,7 +1354,7 @@ const SEED_DATA = {
   // inferred flags come from the seed, status and note stay yours. Without this, editing
   // the seed did nothing to an already-hydrated board and the only way to pick up an edit
   // was WIPE AND RESEED, which threw away every note.
-  seedVersion: 5,
+  seedVersion: 6,
 
   phases: [
     {
@@ -1523,7 +1529,7 @@ const SEED_DATA = {
     { id: "kb-8", label: "Cross-check every AML.T identifier against the live MITRE ATLAS matrix", status: "todo", note: "The code records tactic level only and says so explicitly, which is the correct conservative choice. The doc is where the loose technique ids live, including one row that already carries a confirm-the-name warning.", inferred: false },
     { id: "kb-9", label: "Verify the ATLAS tactic and technique counts before quoting them", status: "todo", note: "Two documents in the project both quote roughly 16 tactics and 84 techniques. They agree with each other, which is not the same as being right.", inferred: false },
     { id: "kb-10", label: "Re-pull live pricing from all three providers before any cost figure ships", status: "todo", note: "", inferred: false },
-    { id: "kb-11", label: "Keep the standalone HTML tracker generated from the JSX, never hand-edited", status: "done", note: "There were two copies of this board: this file, and 'build tracker.html', which embeds the same app inside a script type=text/babel block with React, Babel and Tailwind inlined so it runs offline. They were maintained by hand in parallel, which is the same failure as the old graph.py fork that p0-2 fixed. build_tracker_html.py now generates the HTML from this file and takes --check for CI. It was validated by regenerating the pre-existing HTML from the pre-existing JSX and confirming a byte-for-byte match before any new content went in. tests/test_tracker_sync.py fails if the two drift in either direction, and was itself checked by editing each side in turn and confirming it caught both.", inferred: false },
+    { id: "kb-11", label: "Collapse the tracker to a single file", status: "done", note: "There used to be two copies of this board: fyp_build_tracker.jsx and this HTML file, maintained by hand in parallel. That is the same failure as the old graph.py fork that p0-2 fixed, and it is why the board once described a repo state four days out of date. First fix was a generator, build_tracker_html.py, with a drift test. Second and better fix, chosen deliberately: delete the JSX and the generator and keep only this file. One file cannot fork, so the whole class of problem is gone rather than guarded against. Cost accepted: the board now lives inside a 2.9 MB HTML file. That is fine, because only the inlined React and Babel bundles are minified. SEED_DATA and the whole app below it are plain readable source, and git diffs it line by line as normal.", inferred: false },
   ],
 
   collapsed: { P0: true, P1: true },
