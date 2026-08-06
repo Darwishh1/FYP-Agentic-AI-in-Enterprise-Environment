@@ -1348,7 +1348,7 @@ const SEED_DATA = {
   // inferred flags come from the seed, status and note stay yours. Without this, editing
   // the seed did nothing to an already-hydrated board and the only way to pick up an edit
   // was WIPE AND RESEED, which threw away every note.
-  seedVersion: 4,
+  seedVersion: 5,
 
   phases: [
     {
@@ -1423,7 +1423,7 @@ const SEED_DATA = {
         { id: "p4-4", label: "Build the policy linter for dead rules, conflicts, escalation paths and schema", status: "todo", note: "", inferred: false },
         { id: "p4-5", label: "Reconcile the live policy file against the design doc policy schema", status: "todo", note: "The live file adds privilege_level per agent; the documented schema omits it. RB-006 reads that key, so the doc is the one that is wrong.", inferred: false },
         { id: "p4-6", label: "Enforce can_delegate_to as a rule in the rule engine", status: "todo", note: "Split from the old combined task, because half of it turned out to be done. Still open: can_delegate_to is declared for all four agents in policy.yaml and read by nothing, and delegation_source is logged but never checked. This wants to be an actual RB rule so that a refused delegation produces a finding and a record, rather than being silently clamped.", inferred: false },
-        { id: "p4-7", label: "Cap delegation depth", status: "done", note: "Other half of the old p4-6. MAX_DELEGATION_DEPTH is 3 and is enforced in agent_runtime.py when the planner validates a delegate plan. Caveat worth keeping in view: the cap lives in the planner, not in the policy file and not in the rule engine, so a planner that ignored it would not be caught by the monitor.", inferred: false },
+        { id: "p4-7", label: "Cap delegation depth", status: "done", note: "Other half of the old p4-6. Correction to an earlier version of this note, which put the constant in the wrong file: MAX_DELEGATION_DEPTH is defined in graph.py, defaults to 3 and is overridable by an env var of the same name. graph.py pushes it into the context as max_delegation_depth, both planners in agent_runtime.py check it before proposing a delegation, and graph.py re-checks it while routing. Caveat unchanged and worth keeping in view: the cap lives in the graph and the planner, not in policy.yaml and not in the rule engine, so exceeding it produces no finding and no ToolCallRecord. The monitor cannot see it happen. Note that README.md still lists delegation depth as uncapped, which is wrong.", inferred: false },
       ],
     },
     {
