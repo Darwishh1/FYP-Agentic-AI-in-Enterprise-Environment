@@ -1,73 +1,70 @@
 # Agentic AI Security Monitor
 
+**A runtime security monitor for multi-agent LLM systems.**
+
+A simulated enterprise — HR, Finance, DevOps and Customer Service agents — runs on
+LangGraph. Every tool invocation is forced through a single enforcement gate that
+evaluates the call against a declarative policy, then passes, annotates, or blocks
+it. A red-team suite drives attack scenarios through the same engine and reports
+Detection Rate, False Positive Rate and OWASP tagging accuracy.
+
 Final Year Project — Computer Engineering (AI Honours), UCSI University
 Author: Mahmoud Ashraf Mahmoud · Supervisor: Mr. Adi Ong · Industry co-op: Sparke Labs Sdn. Bhd.
-Repo: `hazem-sparkelabs/agentic-security-monitor` (private)
 
-A runtime security monitor for multi-agent LLM systems. A simulated enterprise
-(HR, Finance, DevOps, Customer Service) runs on LangGraph; every tool invocation
-is forced through a single enforcement gate that evaluates the call against a
-declarative policy and a layered detection stack, then passes, annotates, or
-blocks it. A red-team suite drives attack scenarios through the same engine and
-reports Detection Rate, False Positive Rate, and OWASP tagging accuracy.
+```bash
+pip install -r requirements.txt
+python -m pytest tests/ -q        # 72 tests, no API key needed
+python demo.py --fast             # narrated policy demo, no API key needed
+python -m red_team.runner         # attack suite + evaluation metrics
+```
 
 ---
 
 ## Why this exists
 
-Agentic systems fail differently from single-model chatbots. The interesting
-attack surface is not the prompt, it is the *sequence of tool calls* an agent
-makes once it has been compromised: schema hopping, delegation abuse, payment
-redirection, slow exfiltration. Prompt-level guardrails do not see any of that.
-This project instruments the tool layer instead and asks whether behavioural
+Agentic systems fail differently from single-model chatbots. The interesting attack
+surface is not the prompt — it is the *sequence of tool calls* an agent makes once it
+has been compromised: schema hopping, delegation abuse, payment redirection, slow
+exfiltration. Prompt-level guardrails see none of that.
+
+This project instruments the tool layer instead, and asks whether behavioural
 detection catches what input filtering misses.
 
 ---
 
-## Architecture
+## How it works
 
 ```
 User query
     │
     ▼
-orchestrator (LLM, Gemini Flash) ──── emits a routing keyword
+orchestrator (LLM) ──────────── routes to a specialist agent
     │
-    ├──► hr_agent
-    ├──► finance_agent
-    ├──► devops_agent
-    └──► customer_service_agent
-              │
-              ▼
-      guarded_tool_call()          ← single enforcement choke point
-              │
-              ├─► SecurityMonitor.enforce_policy()   [Layer 3, rule-based]
-              │       └─► policy.yaml
-              │
-              ├─► CONTAIN ? block, log a BLOCKED ToolCallRecord
-              └─► else    ? execute via TOOL_REGISTRY, log a SUCCESS record
-                             (WARN / ALERT annotate the result, do not block)
-              │
-              ▼
-      logs/tool_calls.jsonl        ← the detection corpus
+    ├──► hr_agent      ├──► devops_agent
+    ├──► finance_agent └──► customer_service_agent
+    │
+    ▼
+guarded_tool_call()                    ← the only way to reach a tool
+    │
+    ├─► SecurityMonitor.enforce_policy()  ─── policy.yaml
+    │
+    ├─► CONTAIN → block, log a BLOCKED record
+    └─► else    → execute, log a SUCCESS record
+    │              (WARN and ALERT annotate; they do not block)
+    ▼
+logs/tool_calls.jsonl                  ← the detection corpus
 ```
 
-Every tool ever executed goes through `TOOL_REGISTRY` inside `guarded_tool_call`.
-That is deliberate: one auditable place, no side doors.
+Every tool that ever executes goes through `TOOL_REGISTRY` inside
+`guarded_tool_call`. That is deliberate: one auditable place, no side doors. The gate
+emits exactly one `ToolCallRecord` per call whether it passed or was blocked — a
+property covered by tests, because a gate that skipped records on the block path
+would delete precisely the positives the detection layers need.
 
-### Detection layers
+### Rule set
 
-| Layer | Method | Purpose | Status |
-|-------|--------|---------|--------|
-| 1 | Isolation Forest | Point anomalies on per-call feature vectors | **Not built** |
-| 2 | LSTM Autoencoder | Sequence anomalies over sliding windows | **Not built** |
-| 3 | Rule engine | Deterministic policy enforcement | **Built** |
-| 4 | LLM-as-judge | Semantic intent over raw tool args | **Not built** |
-
-Layers fuse into a composite anomaly score with WARN / ALERT / CONTAIN cutoffs.
-Only Layer 3 exists today, so the current pipeline is single-layer and the
-"triple/quad-layer" language in the older docs is aspirational, not descriptive.
-
-### Rule set (Layer 3, `security_monitor.py`)
+Layer 3 (`security_monitor.py`) evaluates a call against `policy.yaml` and returns
+the single most severe finding. Only `CONTAIN` blocks execution.
 
 | ID | Trigger | Verdict | OWASP |
 |----|---------|---------|-------|
@@ -75,12 +72,98 @@ Only Layer 3 exists today, so the current pipeline is single-layer and the
 | RB-001 | DB schema outside the agent's whitelist | CONTAIN | ASI03 |
 | RB-002 | Tool not whitelisted for the agent | CONTAIN | ASI02 |
 | RB-003 | Payment above the role limit | CONTAIN | ASI02 |
-| RB-004 | Call rate above the per-minute cap | ALERT | ASI02 |
+| RB-004 | Call rate above the windowed cap | ALERT | ASI02 |
 | RB-005 | Instruction-like text in tool arguments | CONTAIN | ASI01 |
 | RB-006 | High-privilege op outside allowed hours | WARN | ASI03 |
 
-`enforce_policy` collects all findings and returns the single most severe one.
-Only CONTAIN blocks execution.
+### Detection layers
+
+| Layer | Method | Purpose | Status |
+|-------|--------|---------|--------|
+| 1 | Isolation Forest | Point anomalies on per-call feature vectors | Not built |
+| 2 | LSTM autoencoder | Sequence anomalies over sliding windows | Not built |
+| 3 | **Rule engine** | Deterministic policy enforcement | **Built** |
+| 4 | LLM-as-judge | Semantic intent over raw tool arguments | Not built |
+
+Layers are designed to fuse into a composite anomaly score. **Only Layer 3 exists
+today**, so the current pipeline is single-layer — any "multi-layer" language in
+older project documents is aspirational, not descriptive.
+
+---
+
+## Status
+
+Honest summary: **the enforcement and evaluation scaffolding is real and tested; the
+machine-learning detection layers are not built yet.**
+
+**Built and covered by tests**
+
+- LangGraph scaffold, four agent nodes, orchestrator routing, agent-to-agent
+  delegation with a depth cap.
+- Two interchangeable planners behind one protocol: a seeded `ScriptedPlanner`
+  (deterministic, free) and an `LLMPlanner`. Selected with `PLANNER_MODE`.
+- `guarded_tool_call` as the sole enforcement gate, checked *before* the tool runs.
+- Layer 3 rule engine, RB-000 to RB-006, severity-ordered findings.
+- `ToolCallRecord` schema, JSONL corpus, replay loader, SQLite checkpointing.
+- Red-team framework: 6 attacks and 2 benign controls, with metrics.
+- Benign traffic generator; ~3,900 calibration and ~3,900 holdout records generated.
+- 72 tests. Their sensitivity was verified by mutation — seven deliberate faults were
+  seeded into the rule engine one at a time and all seven were caught.
+
+**Not built**
+
+Isolation Forest, LSTM autoencoder, semantic judge, score fusion, policy linter,
+adaptive-attacker rounds, external benchmark adapters.
+
+### About the current numbers
+
+The suite reports 100 % detection and 0 % false positives. **Neither figure should be
+quoted as a result yet**, and the tooling says so where it prints them:
+
+- Six attacks, each written against a specific rule. That measures self-consistency,
+  not capability.
+- Only two benign controls. The ~3,900-record benign corpus has not been scored yet.
+- The no-monitor baseline reads 0 %, but *by construction*: scenarios call the
+  detection engine directly and never pass through the orchestrating LLM, so with the
+  rule engine disabled nothing in the path could refuse anything. Until scenarios run
+  end-to-end, the "marginal contribution" of the monitor is not measurable.
+- Precision, recall and F1 are deliberately **not** computed. With 6 attacks and 2
+  controls the denominators are too small to be honest.
+
+---
+
+## Running it
+
+Python 3.12. For the LLM path, put `GOOGLE_API_KEY` in a `.env` file;
+`LLM_MODEL` defaults to `gemini-3.1-flash-lite`.
+
+```bash
+pip install -r requirements.txt
+
+python -m pytest tests/ -q      # test suite                      (no API key)
+python demo.py --fast           # narrated policy demo            (no API key)
+python -m red_team.runner       # attack suite + metrics          (no API key)
+python -m red_team.baseline     # monitor-on vs monitor-off       (no API key)
+python normal_traffic.py        # generate benign corpus + FPR    (no API key)
+
+python app.py                   # full graph, persistent session  (needs API key)
+langgraph dev                   # LangGraph Studio                (needs API key)
+```
+
+Most of the project runs without an API key, because the rule engine is
+deterministic and the default planner is seeded.
+
+`app.py` resumes from `checkpoints.sqlite` on a fixed thread id; delete the file to
+start clean.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `LLM_MODEL` | `gemini-3.1-flash-lite` | Model for orchestration and planning |
+| `PLANNER_MODE` | `scripted` | `scripted` or `llm` |
+| `PLANNER_SEED` | `42` | Seed for the scripted planner |
+| `MAX_DELEGATION_DEPTH` | `3` | Agent-to-agent delegation cap |
+| `SIM_HOUR` | *(unset)* | Pin the simulated clock, for reproducible RB-006 |
+| `SIM_TIME_DEFAULT_INCREMENT` | `2.0` | Seconds each tool call advances the sim clock |
 
 ---
 
@@ -88,156 +171,103 @@ Only CONTAIN blocks execution.
 
 ```
 graph.py              Canonical StateGraph + guarded_tool_call. Single source of truth.
+agent_runtime.py      Planner protocol, ScriptedPlanner, LLMPlanner.
 app.py                CLI runner. Compiles the graph with an on-disk SqliteSaver.
-simulation_graph.py   Deprecated re-export shim. Do not add logic here.
 state.py              EnterpriseState typed session state.
 security_monitor.py   Layer 3 rule engine.
-policy.yaml           Declarative per-agent policy (tools, schemas, limits, hours).
-mock_tools.py         The 8 mock tool implementations + contains_instruction_pattern.
-logging_schema.py     ToolCallRecord (19 fields) + hashing/timestamp helpers.
+policy.yaml           Declarative per-agent policy: tools, schemas, limits, hours.
+mock_tools.py         The 8 mock tool implementations.
+logging_schema.py     ToolCallRecord (19 fields) + hashing and timestamp helpers.
 event_logger.py       Appends to logs/tool_calls.jsonl, exposes load_all().
-attack_context.py     contextvars-based red-team ground-truth labelling.
-demo.py               Narrated ANSI console demo for supervisor meetings.
+attack_context.py     Scoped red-team ground-truth labelling.
+normal_traffic.py     Benign corpus generator + false-positive harness.
+demo.py               Narrated console demo for supervisor meetings.
+simulation_graph.py   Deprecated re-export shim. Do not add logic here.
 red_team/
   base_attack.py      BaseAttackScenario, AgentAction, AttackResult.
   scenarios.py        6 attacks + 2 benign controls.
-  runner.py           Runs the suite, prints DR / FPR / OWASP coverage.
-fyp_build_tracker.jsx React build tracker (phases, statuses, glossary, notes).
+  runner.py           Runs the suite, prints the confusion matrix and metrics.
+  baseline.py         No-monitor control condition.
+tests/                72 tests: rule engine, enforcement gate, labelling, tracker.
+build tracker.html    Standalone build tracker. Open it directly in a browser.
 ```
 
-### Tools available to agents
-
-`db_query`, `execute_shell`, `send_email`, `call_payment_api`, `read_file`,
-`write_file`, `create_ticket`, `escalate_to_human`.
+Agents have access to `db_query`, `execute_shell`, `send_email`, `call_payment_api`,
+`read_file`, `write_file`, `create_ticket` and `escalate_to_human`.
 
 ---
 
-## Running it
+## Known issues — read before trusting any number
 
-```powershell
-# Windows / PowerShell, Python 3.11+
-pip install -r requirements.txt
-# .env needs GOOGLE_API_KEY; LLM_MODEL defaults to gemini-3.1-flash-lite
+Tracked openly rather than quietly fixed, because several are thesis-relevant
+limitations rather than bugs. Two earlier entries in this section have since been
+closed and removed: the ground-truth label is no longer derived from the expectation
+it is checked against, and red-team labelling is now actually applied at runtime.
 
-python app.py                  # full graph, persistent session (thread cli-session-1)
-python demo.py --fast          # supervisor demo over the rule engine, no LLM cost
-python -m red_team.runner      # red-team suite + evaluation metrics
-langgraph dev                  # LangGraph Studio, uses the module-level `graph`
-```
+**Methodological — these affect whether results are defensible**
 
-`app.py` resumes from `checkpoints.sqlite` on the same thread id. Delete the db
-to start clean.
+- Scenarios hit the detection engine directly and never touch the orchestrator.
+  Prompt-injection results scored only against the `contains_instruction_pattern`
+  regex are not defensible: the regex is both the attack target and the judge.
+  **This is the current highest-priority item** — it also blocks the no-monitor
+  baseline from measuring anything.
+- Layer 3 returns a *categorical* status, while the design defines
+  WARN/ALERT/CONTAIN as cutoffs on a *continuous* score. Same tier names, two
+  meanings. One has to give at fusion time.
+- With 6 attacks and 2 controls, precision/recall/F1 denominators are too small to
+  report honestly. Expand the suite first.
+- A future Layer 4 judge would read attacker-controlled argument text, making it an
+  injection target itself. Needs hardening when built.
+
+**Code and config drift**
+
+- `policy.yaml` declares `shell_whitelist` and `can_delegate_to`; no rule reads
+  either, and `delegation_source` is logged but never checked.
+- Delegation depth *is* capped (`MAX_DELEGATION_DEPTH`), but the cap lives in the
+  graph and the planner rather than the rule engine, so exceeding it produces no
+  finding and no record. The monitor cannot see it happen.
+- `security_monitor.py` imports `contains_instruction_pattern` from `mock_tools.py`,
+  so the rule engine depends on the tool mocks. Should move to a detection package.
+- Shell whitelist, network-pattern blocks and path-traversal guards are still
+  hardcoded in `mock_tools.py` instead of living in the policy file.
+
+**Documentation vs code — the repo is authoritative**
+
+- D-001 is tagged ASI02 in code, ASI05 in the project knowledge base. F-002 is ASI10
+  in code, listed under both ASI07 and ASI10 in the docs.
+- Rule ids diverge: the code has RB-000 (rogue identity) and defines RB-002 as tool
+  whitelist; older docs have no RB-000 and define RB-002 differently.
+- `policy.yaml` carries `privilege_level` per agent and RB-006 reads it; the
+  documented schema omits it. The doc is wrong here.
+- One reference (Wang et al. 2024, *Attacking and Defending Multi-Agent Systems*) is
+  likely hallucinated and needs replacing with a verified source. Verify every
+  citation before submission.
+- MITRE ATLAS techniques are recorded at **tactic level only**, deliberately. Do not
+  attach an `AML.T` identifier without checking it against the live matrix.
 
 ---
 
-## What is done
+## Evaluation plan
 
-- LangGraph scaffold, four agent nodes, orchestrator with conditional routing.
-- `guarded_tool_call` as the sole enforcement gate, pre-call (checked *before*
-  the tool runs, not after).
-- Layer 3 rule engine, RB-000 to RB-006, severity-ordered findings.
-- `policy.yaml` loaded at monitor construction as the enforcement source.
-- `ToolCallRecord` schema and JSONL corpus with a replay loader.
-- SqliteSaver checkpointing on a stable thread id.
-- Red-team framework: base class, 6 attacks, 2 benign controls, runner with
-  Detection Rate, FPR, OWASP tag accuracy, per-category coverage.
-- Console demo with boxed verdict output driven by real `enforce_policy` calls.
-- React build tracker with phase collapsing, status cycling, glossary popovers,
-  inline notes, import/export, persistent storage.
+Targets: Detection Rate > 85 %, False Positive Rate < 5 %, OWASP tag accuracy
+reported per category. Comparison systems: Promptfoo, DeepTeam. External benchmarks:
+AgentDojo, Agent Security Bench. Taxonomies: OWASP Top 10 for Agentic Applications
+(ASI01–ASI10) and MITRE ATLAS.
 
-## What is next
+Build order is dependency-driven:
 
-Build order is dependency-driven, not preference-driven:
-
-1. **Baseline traffic generator** — a benign corpus large enough to fit on. The
-   only corpus today is whatever `demo.py` and the red-team runner appended,
-   which is attack-heavy and tiny. Must not consult the ruleset while
-   generating, or Layer 1 learns the rules instead of the behaviour.
-2. **Feature extractor** — the 8 feature fields out of `ToolCallRecord`.
-3. **Isolation Forest (Layer 1)** — trained benign-only. Establish baseline FPR.
-4. **Score fusion** — composite score + tier calibration.
-5. **LSTM Autoencoder (Layer 2)** and **semantic LLM judge (Layer 4)** in
-   parallel once fusion exists.
+1. **Run scenarios end-to-end through the graph.** Restores the LLM to the attack
+   path, makes the baseline a real experiment, and makes injection results
+   defensible.
+2. **Score the existing benign corpus** and record the rule engine's false-positive
+   rate. Already generated, no model cost.
+3. **Isolation Forest (Layer 1)**, trained benign-only, with a measured FPR.
+4. **Score fusion** and tier calibration.
+5. **LSTM autoencoder (Layer 2)** and **semantic judge (Layer 4)**.
 6. **Scenario expansion** — 6 implemented against a 24+ target. Confirmed gaps:
    ASI08 cascading failures, ASI09 human-agent trust exploitation.
 7. **Policy linter** — dead rules, conflicts, escalation paths, schema validation.
-8. **Comparative evaluation** — Promptfoo and DeepTeam adapters, anchored to
-   AgentDojo and Agent Security Bench.
+8. **Comparative evaluation** against the systems above.
 
----
-
-## Known issues — read before trusting anything
-
-These are tracked deliberately rather than quietly fixed, because several of
-them are thesis-relevant limitations, not just bugs.
-
-**Methodological (these affect whether results are defensible):**
-
-- `base_attack.py` derives the ground-truth `is_attack` label from
-  `expect_detected`. Those are different things: one is what the input *is*, the
-  other is what the monitor *should say* about it. They agree today only because
-  no scenario is an attack expected to slip through. This is circular and must be
-  separated before any headline number is reported.
-- Scenarios hit the detection engine directly and never touch the orchestrator.
-  Prompt-injection results scored only against the `contains_instruction_pattern`
-  regex are not defensible — the regex is both the attack target and the judge.
-- `set_attack_label` is never called anywhere; `graph.py` imports only
-  `get_attack_label`. So `is_attack` is always false outside the red-team classes.
-- Layer 3 returns a *categorical* status while the design doc defines
-  WARN/ALERT/CONTAIN as cutoffs on a *continuous* score. Same tier names, two
-  meanings. One of them has to give at fusion time.
-- With 6 attacks and 2 controls, precision/recall/F1 denominators are too small
-  to report honestly. Expand the suite first, then compute them.
-- The Layer 4 judge reads attacker-controlled argument text, which makes it an
-  injection target itself. Needs hardening and an explicit mention in the thesis.
-
-**Code / config drift:**
-
-- `policy.yaml` declares `shell_whitelist` and `can_delegate_to`; no rule reads
-  either. `delegation_source` is logged but never checked. Delegation depth is
-  uncapped.
-- `security_monitor.py` imports `contains_instruction_pattern` from
-  `mock_tools.py`, so the rule engine depends on the tool mocks. Should move into
-  a detection package.
-- Shell whitelist, network-pattern blocks, and path-traversal guards are still
-  hardcoded in `mock_tools.py` instead of living in the policy file.
-
-**Doc vs code discrepancies (repo is authoritative):**
-
-- D-001 is tagged ASI02 in code, ASI05 in the knowledge base. F-002 is ASI10 in
-  code, listed under both ASI07 and ASI10 in the doc.
-- Rule ids diverge: code has RB-000 (rogue identity) and defines RB-002 as tool
-  whitelist; the doc has no RB-000 and defines RB-002 as shell exec with network
-  reach.
-- `policy.yaml` carries `privilege_level` per agent and RB-006 reads it; the
-  documented schema omits it. The doc is wrong here.
-- Orchestrator is Gemini Flash in code; some KB sections still say Claude Sonnet.
-- "Triple-layer" language persists in places that should say four layers.
-- One reference (Wang et al. 2024, *Attacking and Defending Multi-Agent Systems*)
-  is likely hallucinated and needs replacing with a verified source. The KB has a
-  history of this — verify every citation before submission.
-- MITRE ATLAS technique IDs are deliberately recorded at **tactic level only**.
-  Do not attach an `AML.T` id without checking it against the live matrix.
-
-**Sync warning:** the indexed repo state does not include the planner-driven
-`graph.py` rewrite, `normal_traffic.py`, or the sliding-window RB-004 redesign
-that were developed in session. Either those are unpushed, or the project index
-is stale. Reconcile before treating this README as current.
-
----
-
-## Model stack
-
-| Role | Model |
-|------|-------|
-| Orchestrator / routing | Gemini Flash (`LLM_MODEL`, default `gemini-3.1-flash-lite`) |
-| Semantic judge (Layer 4) | Claude Sonnet |
-| Red-team adversarial generation | GPT |
-| Dev tooling | Claude Code (not part of the deployed system) |
-
-## Evaluation targets
-
-Detection Rate > 85% · False Positive Rate < 5% · OWASP tag accuracy reported per
-category. Baselines: Promptfoo, DeepTeam. Benchmarks: AgentDojo, Agent Security
-Bench (ASB). Taxonomies: OWASP Top 10 for Agentic Applications 2026 (ASI01–ASI10),
-MITRE ATLAS.
+Progress is tracked in `build tracker.html`, which opens directly in a browser with
+no server or build step.
