@@ -229,6 +229,13 @@ class LLMPlanner:
             depth = context.get("delegation_depth", 0)
             if target not in ROLES or depth >= context.get("max_delegation_depth", 3):
                 return ToolPlan(kind="finish", rationale="delegation refused (unknown target or depth cap)")
+            # Self-delegation is a no-op that still consumes a step, so a model that
+            # picks it twice ends the session having done nothing. Observed for real:
+            # hr_agent delegated to hr_agent, exhausted its budget, and the run
+            # produced zero tool calls — which reads as "attack not detected" when
+            # in fact the attack was never attempted.
+            if target == role:
+                return ToolPlan(kind="finish", rationale=f"delegation refused ({role} to itself)")
             return ToolPlan(kind="delegate", delegate_to=target, rationale="model chose to delegate")
         if action == "tool":
             tool = data.get("tool")

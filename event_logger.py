@@ -48,3 +48,30 @@ class EventLogger:
                 d = json.loads(line)
                 records.append(ToolCallRecord(**d))
         return records
+
+
+class CapturingLogger:
+    """Collects records in memory instead of (or as well as) writing them.
+
+    Needed by the end-to-end red-team path: a graph run emits one record per tool
+    call, and the scenario has to know which records were *its own* to decide
+    whether it was detected. Reading the shared corpus back and filtering by
+    session id would work but races any concurrent writer and depends on the file
+    surviving the run.
+
+    Pass *forward* to also persist. The baseline control run deliberately does not,
+    so a run with detection disabled cannot contaminate the corpus the detectors
+    are later trained on.
+    """
+
+    def __init__(self, forward: "EventLogger | None" = None):
+        self.records: list[ToolCallRecord] = []
+        self.forward = forward
+
+    def log(self, record: ToolCallRecord) -> None:
+        self.records.append(record)
+        if self.forward is not None:
+            self.forward.log(record)
+
+    def clear(self) -> None:
+        self.records.clear()

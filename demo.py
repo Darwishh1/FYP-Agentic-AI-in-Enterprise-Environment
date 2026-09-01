@@ -2,8 +2,16 @@
 Supervisor demo — three scenarios through the real SecurityMonitor.
 
 Usage:
-    python demo.py          # interactive (pauses between scenarios)
-    python demo.py --fast   # no sleeps, no Enter prompts
+    python demo.py                   # interactive (pauses between scenarios)
+    python demo.py --fast            # no sleeps, no Enter prompts
+    python demo.py --fast --only 5   # one scenario only, no summary table
+    python demo.py --fast --session "<task>"   # one benign session end to end
+
+The --session mode drives the real graph rather than calling the rule engine
+directly, so it shows routing, delegation and the tools each agent actually
+called. Fix PLANNER_SEED in the environment to make it reproducible, and run
+exactly one session per process: the scripted planner keeps one RNG at module
+scope, so its state carries across sessions within a process.
 """
 import sys
 import time
@@ -238,11 +246,76 @@ def run_demo_scenario(
 
 
 # ---------------------------------------------------------------------------
+# Benign session mode (--session): drives the real graph, not the rule engine
+# ---------------------------------------------------------------------------
+def run_benign_session(task: str, session_id: str, steps: int = 8) -> int:
+    """Run one task through the real graph and narrate what each agent did.
+
+    Imported lazily so the default demo path never constructs a planner or a
+    model client. Returns the number of findings raised.
+    """
+    from graph import run_session, PLANNER_SEED, E2E_SIM_HOUR, PLANNER_MODE
+
+    records, state = run_session(task, session_id=session_id, steps=steps)
+    ctx = state["context"]
+
+    print()
+    print(_box_top(f"BENIGN SESSION  —  {session_id}"))
+    print()
+    print(_section("RUN PARAMETERS"))
+    print(_kv("Session ID", session_id))
+    print(_kv("Planner", f"{PLANNER_MODE} (seed {PLANNER_SEED})"))
+    print(_kv("Simulated hour", str(E2E_SIM_HOUR)))
+
+    print()
+    print(_section("INCOMING REQUEST"))
+    print(f'    "{task}"')
+
+    print()
+    print(_section("AGENTS THAT ACTED"))
+    path = ctx.get("delegation_path", [])
+    print(_kv("Routing chain", " -> ".join(path) if path else "none"))
+    for msg in state["messages"]:
+        text = str(getattr(msg, "content", "")).strip()
+        if text.startswith("orchestrator:") or ": delegating to " in text:
+            print(f"    {DIM}{text[:88]}{RESET}")
+
+    print()
+    print(_section("TOOL CALLS THROUGH THE ENFORCEMENT GATE"))
+    if not records:
+        print(f"    {DIM}no tool call reached the gate{RESET}")
+    for rec in records:
+        colour = _status_colour(rec.policy_status)
+        rule = rec.rule_ids[0] if rec.rule_ids else "-"
+        print(f"    {rec.agent_role:<24s} {rec.tool_name:<18s} "
+              f"{colour}{rec.policy_status:<8s}{RESET} {rule}")
+
+    findings = [r for r in records if r.policy_status != "PASS"]
+    print()
+    print(_section("SESSION RESULT"))
+    print(_kv("Tool calls", str(len(records))))
+    if findings:
+        print(_kv("Findings raised", str(len(findings)), RED))
+    else:
+        print(_kv("Findings raised", "0 - no findings raised", GREEN))
+    print()
+    print(_box_bottom())
+    print()
+    return len(findings)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Supervisor demo")
     parser.add_argument("--fast", action="store_true", help="Skip sleeps and Enter prompts")
+    parser.add_argument("--only", type=int, default=None, metavar="N",
+                        help="Run only scenario N (1-based). Suppresses the summary table.")
+    parser.add_argument("--session", metavar="TASK", default=None,
+                        help="Run one task end to end through the real graph instead.")
+    parser.add_argument("--session-id", default="demo-benign-001",
+                        help="Session id used by --session.")
     args = parser.parse_args()
 
     # Console-safe UTF-8 on Windows
@@ -265,12 +338,27 @@ def main():
     print(f"  Agents defined: {', '.join(policy.get('agents', {}).keys())}")
     print()
 
+    if args.session is not None:
+        run_benign_session(args.session, args.session_id)
+        return
+
+    selected = list(enumerate(DEMO_SCENARIOS))
+    if args.only is not None:
+        if not 1 <= args.only <= len(DEMO_SCENARIOS):
+            parser.error(f"--only must be between 1 and {len(DEMO_SCENARIOS)}")
+        selected = [selected[args.only - 1]]
+
     summaries = []
-    for i, meta in enumerate(DEMO_SCENARIOS):
-        if not args.fast and i > 0:
+    for n, (i, meta) in enumerate(selected):
+        if not args.fast and n > 0:
             input(f"  {DIM}Press Enter to continue to scenario {i + 1}...{RESET}")
         summary = run_demo_scenario(meta, monitor, policy, i, fast=args.fast)
         summaries.append(summary)
+
+    # A single-scenario run is its own summary; the table would just restate it.
+    if args.only is not None:
+        print()
+        return
 
     # ---- summary table ----
     print()

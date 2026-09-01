@@ -28,17 +28,18 @@ WHAT CHANGED FROM THE PREVIOUS VERSION
 import os
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
 
 from state import EnterpriseState, new_context  # noqa: F401  (new_context re-exported)
 import mock_tools
 from security_monitor import SecurityMonitor
 from logging_schema import ToolCallRecord
-from event_logger import EventLogger
+from event_logger import EventLogger, CapturingLogger
 from attack_context import get_attack_label
 from agent_runtime import build_planner, ROLES, ToolPlan
 
@@ -86,6 +87,42 @@ SIM_TIME_TOOL_OVERRIDES: dict[str, float] = {
     "db_query": 1.5,
     "write_file": 2.5,
 }
+
+# --- Swappable components ----------------------------------------------------
+# guarded_tool_call reads `monitor` and `event_logger` as module globals at call
+# time, so swapping them here changes what a graph run enforces and where its
+# records go, without threading either through every node signature.
+#
+# Two callers need this. The end-to-end red-team path installs a CapturingLogger
+# to isolate one scenario's records; the baseline control installs a NullMonitor
+# to measure what the system refuses with detection switched off.
+
+@contextmanager
+def use_components(monitor_override=None, logger_override=None, sim_hour=None):
+    """Temporarily replace the monitor, event logger and/or simulated hour.
+
+    Restores the originals on exit, including on exception — a control run that
+    left NullMonitor installed would silently disable enforcement for everything
+    that ran afterwards in the same process.
+
+    *sim_hour* pins the clock RB-006 reads. Evaluation runs must set it: with it
+    unset the hour comes from the wall clock, so the same suite scores differently
+    at 09:00 and at 20:00, and an after-hours finding appears or vanishes with no
+    change to the code or the attack.
+    """
+    global monitor, event_logger, SIM_HOUR
+    prev_monitor, prev_logger, prev_hour = monitor, event_logger, SIM_HOUR
+    if monitor_override is not None:
+        monitor = monitor_override
+    if logger_override is not None:
+        event_logger = logger_override
+    if sim_hour is not None:
+        SIM_HOUR = sim_hour
+    try:
+        yield
+    finally:
+        monitor, event_logger, SIM_HOUR = prev_monitor, prev_logger, prev_hour
+
 
 TOOL_REGISTRY = {
     "db_query": mock_tools.db_query,
@@ -206,7 +243,22 @@ _PRIVILEGE = {
 
 def _latest_task(state: EnterpriseState) -> str:
     """The text the agent is acting on. Under the LLM planner this is the
-    injection surface: whatever reaches here can influence the plan."""
+    injection surface: whatever reaches here can influence the plan.
+
+    Must be the most recent *human* turn. Scanning for the last message of any
+    type looks equivalent but is not: by the time an agent node runs, the last
+    message is the orchestrator's own "routing to finance_agent" status line, so
+    every agent planned against that string and never saw the request at all.
+    Injected text could not reach a planner, which silently made end-to-end
+    injection untestable while appearing to work.
+    """
+    for msg in reversed(state["messages"]):
+        if isinstance(msg, HumanMessage):
+            content = getattr(msg, "content", "")
+            if isinstance(content, str) and content.strip():
+                return content
+    # No human turn (e.g. a resumed session): fall back to the newest non-empty
+    # message so the agent still has something to act on.
     for msg in reversed(state["messages"]):
         content = getattr(msg, "content", "")
         if isinstance(content, str) and content.strip():
@@ -345,3 +397,62 @@ def build_graph(checkpointer=None):
 
 
 graph = build_graph()
+
+
+# --- Single-session driver ---------------------------------------------------
+
+#: Hour the end-to-end path pins the simulated clock to. Mid-business-hours on
+#: purpose: every agent's allowed_hours window contains 11, so RB-006 cannot fire
+#: on any role and an after-hours finding in an e2e result is impossible rather
+#: than merely unlikely. Override with E2E_SIM_HOUR to test after-hours behaviour
+#: deliberately.
+E2E_SIM_HOUR = int(os.getenv("E2E_SIM_HOUR", "11"))
+
+
+def run_session(
+    task: str,
+    *,
+    session_id: str,
+    monitor_override=None,
+    persist: bool = False,
+    steps: int = 6,
+    compiled=None,
+    sim_hour: int | None = None,
+):
+    """Drive one task through the real graph and return (records, final_state).
+
+    This is the entry point the end-to-end red-team path uses. The attack text
+    arrives as the human message, exactly as an attacker would supply it: the
+    orchestrator classifies it, the planner chooses a tool and its arguments, and
+    only then does the enforcement gate see anything. Nothing is pre-decided.
+
+    That ordering is the whole point of running end to end. When the planner is
+    the LLM, a prompt-injection result is a claim about a model being steered into
+    a tool call, rather than a regex matching the string that the same regex was
+    written against.
+
+    persist=False keeps the run out of logs/tool_calls.jsonl. Evaluation and
+    control runs default to that so repeated scoring does not inflate the corpus.
+
+    The clock is pinned (E2E_SIM_HOUR, default 11) rather than left on wall time.
+    Without that, RB-006 fires on any HIGH-privilege role outside 08:00-18:00, so
+    a scenario that has nothing to do with working hours scores as detected purely
+    because of when the suite was run — and stops scoring that way the next
+    morning. Observed for real on A-001 at hour 20.
+    """
+    from langchain_core.messages import HumanMessage
+
+    capture = CapturingLogger(forward=EventLogger() if persist else None)
+    app = compiled if compiled is not None else graph
+
+    with use_components(
+        monitor_override=monitor_override,
+        logger_override=capture,
+        sim_hour=E2E_SIM_HOUR if sim_hour is None else sim_hour,
+    ):
+        final_state = app.invoke({
+            "messages": [HumanMessage(content=task)],
+            "context": new_context(session_id, steps=steps),
+        })
+
+    return capture.records, final_state
