@@ -13,7 +13,7 @@ Author: Mahmoud Ashraf Mahmoud · Supervisor: Mr. Adi Ong · Industry co-op: Spa
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests/ -q        # 72 tests, no API key needed
+python -m pytest tests/ -q        # test suite, no API key needed
 python demo.py --fast             # narrated policy demo, no API key needed
 python -m red_team.runner         # attack suite + evaluation metrics
 ```
@@ -106,9 +106,10 @@ machine-learning detection layers are not built yet.**
 - Layer 3 rule engine, RB-000 to RB-006, severity-ordered findings.
 - `ToolCallRecord` schema, JSONL corpus, replay loader, SQLite checkpointing.
 - Red-team framework: 6 attacks and 2 benign controls, with metrics.
-- Benign traffic generator; ~3,900 calibration and ~3,900 holdout records generated.
-- 72 tests. Their sensitivity was verified by mutation — seven deliberate faults were
-  seeded into the rule engine one at a time and all seven were caught.
+- Benign traffic generator; 3,941 calibration and 3,975 holdout records generated.
+- 56 test functions, 72 cases under parametrisation. 63 cover the security system;
+  the remaining 9 check that `build tracker.html` stays self-contained, which is
+  documentation tooling rather than a result.
 
 **Not built**
 
@@ -188,7 +189,8 @@ red_team/
   scenarios.py        6 attacks + 2 benign controls.
   runner.py           Runs the suite, prints the confusion matrix and metrics.
   baseline.py         No-monitor control condition.
-tests/                72 tests: rule engine, enforcement gate, labelling, tracker.
+tests/                rule engine (26), enforcement gate (8), ground truth (7),
+                      baseline (6), tracker html (9).
 build tracker.html    Standalone build tracker. Open it directly in a browser.
 ```
 
@@ -216,6 +218,10 @@ it is checked against, and red-team labelling is now actually applied at runtime
   meanings. One has to give at fusion time.
 - With 6 attacks and 2 controls, precision/recall/F1 denominators are too small to
   report honestly. Expand the suite first.
+- Test *count* is not test *sensitivity*. Nothing here establishes that the suite
+  would fail if a rule were subtly wrong — no mutation testing or coverage
+  measurement has been committed. Until one of those exists, "the tests pass" means
+  the asserted cases hold, and nothing stronger.
 - A future Layer 4 judge would read attacker-controlled argument text, making it an
   injection target itself. Needs hardening when built.
 
