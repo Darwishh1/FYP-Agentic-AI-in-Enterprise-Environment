@@ -87,7 +87,13 @@ class SecurityMonitor:
 
         # RB-004: rapid tool cycling within the sliding window.
         # Resolve cap: per-tool override > per-agent fallback > skip.
-        _rate = tool_call_rate if tool_call_rate is not None else call_count
+        # A cumulative session count is not a rate. Using it as the fallback meant
+        # any caller that did not supply a window got session-cumulative counting,
+        # so a long, entirely benign session eventually tripped this rule on nothing.
+        # The rule now evaluates only when a caller supplies a windowed rate, and is
+        # skipped otherwise. call_count stays in the signature: it is still logged on
+        # the record as turn_index, it is simply no longer mistaken for a rate.
+        _rate = tool_call_rate
         if _rate is not None:
             per_tool = agent_rules.get("tool_rate_limits", {}).get(action_type)
             per_agent = agent_rules.get("max_calls_per_minute")
