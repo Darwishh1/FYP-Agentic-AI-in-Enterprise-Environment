@@ -180,6 +180,7 @@ class BaseAttackScenario:
                 owasp_tags=owasp_tags,
                 is_attack=labelled_is_attack,
                 attack_id=labelled_attack_id,
+                planner="direct",
             )
             logger.log(record)
 
@@ -227,14 +228,26 @@ class BaseAttackScenario:
         # Imported here, not at module scope: importing graph constructs a planner
         # and (under PLANNER_MODE=llm) a model client, which the direct path and
         # the unit tests must not pay for.
-        from graph import run_session
+        import graph
+        from event_logger import CORPUS
+
+        # Under the scripted planner the plan never reads injected_task, so these
+        # records are benign workload draws carrying an attack label. Persisting
+        # them would put label noise into a corpus a detector might later be
+        # scored on. Only LLM-planner runs are allowed into the e2e corpus.
+        sink = None
+        if persist:
+            if graph.PLANNER_MODE == "llm":
+                sink = EventLogger(path=CORPUS["redteam_e2e"])
+            else:
+                print(f"  [{self.attack_id}] not persisting: scripted planner ignores the attack text")
 
         with attack_label(self.attack_id, is_attack=self.is_attack):
-            records, _state = run_session(
+            records, _state = graph.run_session(
                 self.injected_task,
                 session_id=f"e2e-{self.attack_id}",
                 monitor_override=monitor_override,
-                persist=persist,
+                sink=sink,
             )
 
         flagged = [r for r in records if r.policy_status != "PASS"]

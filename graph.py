@@ -24,11 +24,21 @@ WHAT CHANGED FROM THE PREVIOUS VERSION
      ToolCallRecord.
   6. rows_returned / bytes_returned come from the tool's ToolResult instead of
      being None and len(f-string).
+  7. Agents loop. After a tool call the agent keeps the turn until it finishes,
+     delegates, or runs out of steps. Every session used to end after exactly one
+     tool call (route_from saw next_agent=None and went to END), which made every
+     windowed and sequence feature constant and left Layer 2 nothing to model.
+  8. Observe mode (use_components(enforce=False)): rules still run and their
+     verdict is recorded, but nothing is blocked. Used to build detector corpora,
+     so a call Layer 3 would have contained still executes and still has real
+     volume. Without it, a blocked call has bytes=0 because Layer 3 blocked it,
+     and any detector reading volume would be partly reading Layer 3's verdict.
+  9. Optional Layer 1 shadow score on every record (l1_score). Never enforced.
 """
 import os
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -40,7 +50,7 @@ import mock_tools
 from security_monitor import SecurityMonitor
 from logging_schema import ToolCallRecord
 from event_logger import EventLogger, CapturingLogger
-from attack_context import get_attack_label
+from attack_context import get_attack_label, attack_label
 from agent_runtime import build_planner, ROLES, ToolPlan
 
 load_dotenv()
@@ -67,6 +77,33 @@ planner = build_planner(PLANNER_MODE, model=_model, seed=PLANNER_SEED)
 
 monitor = SecurityMonitor()
 event_logger = EventLogger()
+
+#: When False the gate runs the rules and records the verdict but blocks nothing.
+#: Only ever changed through use_components(enforce=False), which restores it.
+ENFORCE = True
+
+#: Layer 1 shadow scorer (detection.isolation_forest.ShadowScorer) or None. Loaded
+#: lazily from LAYER1_MODEL if the file exists; LAYER1_SHADOW=0 disables it. It
+#: annotates records and never influences enforcement.
+layer1 = None
+
+
+def _init_layer1():
+    global layer1
+    if os.getenv("LAYER1_SHADOW", "1") == "0":
+        return
+    path = os.getenv("LAYER1_MODEL", os.path.join("models", "layer1_iforest.joblib"))
+    if not os.path.exists(path):
+        return
+    try:
+        from detection.isolation_forest import ShadowScorer
+        layer1 = ShadowScorer.load(path)
+    except Exception as exc:  # a broken model file must not take the gate down
+        print(f"[layer1] shadow scorer disabled: {exc}", file=sys.stderr)
+        layer1 = None
+
+
+_init_layer1()
 MAX_DELEGATION_DEPTH = int(os.getenv("MAX_DELEGATION_DEPTH", "3"))
 
 # Pinning the clock. Moving to UTC made RB-006 consistent within a run, but the
@@ -97,8 +134,12 @@ SIM_TIME_TOOL_OVERRIDES: dict[str, float] = {
 # to isolate one scenario's records; the baseline control installs a NullMonitor
 # to measure what the system refuses with detection switched off.
 
+_UNSET = object()
+
+
 @contextmanager
-def use_components(monitor_override=None, logger_override=None, sim_hour=None):
+def use_components(monitor_override=None, logger_override=None, sim_hour=None,
+                   planner_override=None, enforce=None, layer1_override=_UNSET):
     """Temporarily replace the monitor, event logger and/or simulated hour.
 
     Restores the originals on exit, including on exception — a control run that
@@ -110,8 +151,14 @@ def use_components(monitor_override=None, logger_override=None, sim_hour=None):
     at 09:00 and at 20:00, and an after-hours finding appears or vanishes with no
     change to the code or the attack.
     """
-    global monitor, event_logger, SIM_HOUR
-    prev_monitor, prev_logger, prev_hour = monitor, event_logger, SIM_HOUR
+    global monitor, event_logger, SIM_HOUR, planner, ENFORCE, layer1
+    prev = (monitor, event_logger, SIM_HOUR, planner, ENFORCE, layer1)
+    if planner_override is not None:
+        planner = planner_override
+    if enforce is not None:
+        ENFORCE = enforce
+    if layer1_override is not _UNSET:
+        layer1 = layer1_override
     if monitor_override is not None:
         monitor = monitor_override
     if logger_override is not None:
@@ -121,7 +168,7 @@ def use_components(monitor_override=None, logger_override=None, sim_hour=None):
     try:
         yield
     finally:
-        monitor, event_logger, SIM_HOUR = prev_monitor, prev_logger, prev_hour
+        monitor, event_logger, SIM_HOUR, planner, ENFORCE, layer1 = prev
 
 
 TOOL_REGISTRY = {
@@ -194,7 +241,7 @@ def guarded_tool_call(
     is_attack, attack_id = get_attack_label()
     rule_ids = [check["rule_id"]] if check.get("rule_id") else []
     owasp_tags = [check["owasp_tag"]] if check.get("owasp_tag") else []
-    blocked = check["status"] == "CONTAIN"
+    blocked = ENFORCE and check["status"] == "CONTAIN"
 
     if blocked:
         result = None
@@ -204,7 +251,7 @@ def guarded_tool_call(
         result = TOOL_REGISTRY[tool_name](**effective_kwargs, context=ctx)
         latency_ms = (time.perf_counter() - t0) * 1000
 
-    event_logger.log(ToolCallRecord(
+    record = ToolCallRecord(
         session_id=ctx.get("session_id", "unknown"),
         turn_index=ctx["call_count"],
         timestamp=ToolCallRecord.utcnow_iso(),
@@ -224,7 +271,18 @@ def guarded_tool_call(
         owasp_tags=owasp_tags,
         is_attack=is_attack,
         attack_id=attack_id,
-    ))
+        sim_hour=hour,
+        sim_time_seconds=sim_time,
+        delegation_depth=ctx.get("delegation_depth"),
+        enforcement_mode="enforce" if ENFORCE else "observe",
+        planner=getattr(planner, "name", None),
+    )
+    if layer1 is not None:
+        try:
+            record.l1_score = layer1.score_record(record)
+        except Exception as exc:  # shadow mode: a scorer fault never blocks a call
+            print(f"[layer1] scoring failed: {exc}", file=sys.stderr)
+    event_logger.log(record)
 
     if blocked:
         return f"CONTAIN {tag}: {check['reason']}"
@@ -239,6 +297,13 @@ _PRIVILEGE = {
     "hr_agent": "MEDIUM", "finance_agent": "HIGH",
     "devops_agent": "HIGH", "customer_service_agent": "LOW",
 }
+
+
+def _privilege(role: str) -> str:
+    """Privilege as declared in policy.yaml, falling back to the static map when
+    the active monitor has no policy for the role (e.g. the NullMonitor control)."""
+    declared = (getattr(monitor, "policy", {}) or {}).get("agents", {}).get(role, {}).get("privilege_level")
+    return declared or _PRIVILEGE.get(role, "LOW")
 
 
 def _latest_task(state: EnterpriseState) -> str:
@@ -273,7 +338,8 @@ def make_agent_node(role: str):
     def node(state: EnterpriseState):
         ctx = dict(state["context"])          # copy, do not mutate graph state
         ctx["agent_role"] = role
-        ctx["privilege_level"] = _PRIVILEGE.get(role, "LOW")
+        ctx["privilege_level"] = _privilege(role)
+        ctx["action_log"] = list(ctx.get("action_log", []))
         ctx["max_delegation_depth"] = MAX_DELEGATION_DEPTH
         ctx["steps_remaining"] = max(ctx.get("steps_remaining", 6) - 1, 0)
 
@@ -285,20 +351,29 @@ def make_agent_node(role: str):
             ctx["delegation_depth"] = len(path) - 1
             ctx["delegation_source"] = role
             ctx["next_agent"] = plan.delegate_to
+            ctx["action_log"].append(f"{role} delegated to {plan.delegate_to}")
             msg = f"{role}: delegating to {plan.delegate_to} ({plan.rationale})"
             return {"messages": [AIMessage(content=msg)], "context": ctx}
 
-        ctx["next_agent"] = None
-
         if plan.kind == "tool" and plan.tool:
-            out = guarded_tool_call(
-                ctx, plan.tool,
-                resource=plan.resource,
-                amount=plan.amount,
-                args_text=plan.args_text,      # RB-005 can now actually fire
-                tool_kwargs=plan.kwargs,
-            )
+            # A behavioural trace labels individual calls; everything else inherits
+            # whatever label the caller scoped around the session (usually none).
+            scope = attack_label(plan.attack_id, True) if plan.attack_id else nullcontext()
+            with scope:
+                out = guarded_tool_call(
+                    ctx, plan.tool,
+                    resource=plan.resource,
+                    amount=plan.amount,
+                    args_text=plan.args_text,      # RB-005 can now actually fire
+                    tool_kwargs=plan.kwargs,
+                )
+            ctx["action_log"].append(f"{plan.tool}({plan.kwargs}) -> {out[:120]}")
+            # Keep the turn. The agent goes again until it finishes, delegates, or
+            # route_from sees the step budget is spent.
+            ctx["next_agent"] = role
             return {"messages": [AIMessage(content=f"{role}: {out}")], "context": ctx}
+
+        ctx["next_agent"] = None
 
         return {"messages": [AIMessage(content=f"{role}: finished ({plan.rationale})")],
                 "context": ctx}
@@ -418,6 +493,10 @@ def run_session(
     steps: int = 6,
     compiled=None,
     sim_hour: int | None = None,
+    planner_override=None,
+    enforce: bool | None = None,
+    sink=None,
+    layer1_override=_UNSET,
 ):
     """Drive one task through the real graph and return (records, final_state).
 
@@ -439,20 +518,34 @@ def run_session(
     a scenario that has nothing to do with working hours scores as detected purely
     because of when the suite was run — and stops scoring that way the next
     morning. Observed for real on A-001 at hour 20.
+
+    planner_override swaps the planner for this run only (corpus generation passes
+    a seeded ScriptedPlanner, behavioural traces pass a ReplayPlanner). enforce=False
+    runs in observe mode. *sink* is any object with .log(record) that also receives
+    every record; persist=True is shorthand for the live corpus file.
     """
     from langchain_core.messages import HumanMessage
 
-    capture = CapturingLogger(forward=EventLogger() if persist else None)
+    forward = sink if sink is not None else (EventLogger() if persist else None)
+    capture = CapturingLogger(forward=forward)
     app = compiled if compiled is not None else graph
 
     with use_components(
         monitor_override=monitor_override,
         logger_override=capture,
         sim_hour=E2E_SIM_HOUR if sim_hour is None else sim_hour,
+        planner_override=planner_override,
+        enforce=enforce,
+        layer1_override=layer1_override,
     ):
-        final_state = app.invoke({
-            "messages": [HumanMessage(content=task)],
-            "context": new_context(session_id, steps=steps),
-        })
+        final_state = app.invoke(
+            {
+                "messages": [HumanMessage(content=task)],
+                "context": new_context(session_id, steps=steps),
+            },
+            # Agents loop now, so a long session needs more than LangGraph's
+            # default 25 supersteps. Budget is bounded by `steps` anyway.
+            config={"recursion_limit": 2 * steps + 10},
+        )
 
     return capture.records, final_state

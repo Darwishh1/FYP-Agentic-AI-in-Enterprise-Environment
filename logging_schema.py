@@ -45,13 +45,25 @@ class ToolCallRecord:
     latency_ms: float
 
     # --- policy verdict ---
-    policy_status: str                      # PASS / WARN / CONTAIN
+    policy_status: str                      # PASS / WARN / ALERT / CONTAIN
     rule_ids: list[str] = field(default_factory=list)
     owasp_tags: list[str] = field(default_factory=list)
 
     # --- ground-truth labels (set by red-team runner only) ---
     is_attack: bool = False
     attack_id: str | None = None
+
+    # --- simulation context (added for the detection layers) ---
+    # All defaulted, so JSONL written before these fields existed still loads.
+    # sim_hour / sim_time_seconds are the clock the rules actually ran on. The
+    # wall-clock `timestamp` above is not usable as a feature: it says when the
+    # corpus was generated, not when the simulated call happened.
+    sim_hour: int | None = None
+    sim_time_seconds: float | None = None
+    delegation_depth: int | None = None
+    enforcement_mode: str = "enforce"       # enforce | observe (rules run, nothing blocked)
+    planner: str | None = None              # scripted | llm | replay | direct
+    l1_score: float | None = None           # Layer 1 shadow score in [0,1], never enforced
 
     # -- helpers --
 

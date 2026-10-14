@@ -16,6 +16,12 @@ pip install -r requirements.txt
 python -m pytest tests/ -q        # test suite, no API key needed
 python demo.py --fast             # narrated policy demo, no API key needed
 python -m red_team.runner         # attack suite + evaluation metrics
+
+# Layer 1 end to end (about a minute, no API key)
+python normal_traffic.py --all            # benign train / calib / holdout through the real graph
+python -m red_team.behavioural            # behavioural attack traces
+python -m detection.train                 # -> models/layer1_iforest.joblib
+python -m detection.evaluate --seed-sweep 5   # -> reports/layer1/results.md
 ```
 
 ---
@@ -52,8 +58,15 @@ guarded_tool_call()                    ← the only way to reach a tool
     └─► else    → execute, log a SUCCESS record
     │              (WARN and ALERT annotate; they do not block)
     ▼
-logs/tool_calls.jsonl                  ← the detection corpus
+logs/*.jsonl                           ← one corpus file per source
 ```
+
+Agents loop: after a tool call the agent keeps the turn until it finishes,
+delegates, or exhausts its step budget. The gate can also run in **observe mode**
+(`use_components(enforce=False)`): rules run and their verdict is recorded on the
+record, but nothing is blocked. Detector corpora are generated that way so a call
+Layer 3 would have contained still has real volume, and so Layer 1 and Layer 3 can
+be scored on identical calls.
 
 Every tool that ever executes goes through `TOOL_REGISTRY` inside
 `guarded_tool_call`. That is deliberate: one auditable place, no side doors. The gate
@@ -80,14 +93,54 @@ the single most severe finding. Only `CONTAIN` blocks execution.
 
 | Layer | Method | Purpose | Status |
 |-------|--------|---------|--------|
-| 1 | Isolation Forest | Point anomalies on per-call feature vectors | Not built |
+| 1 | **Isolation Forest** | Behavioural anomalies per call, with session context | **Built, shadow mode** |
 | 2 | LSTM autoencoder | Sequence anomalies over sliding windows | Not built |
 | 3 | **Rule engine** | Deterministic policy enforcement | **Built** |
 | 4 | LLM-as-judge | Semantic intent over raw tool arguments | Not built |
 
-Layers are designed to fuse into a composite anomaly score. **Only Layer 3 exists
-today**, so the current pipeline is single-layer — any "multi-layer" language in
-older project documents is aspirational, not descriptive.
+Layers are designed to fuse into a composite anomaly score. Layers 1 and 3 exist.
+Layer 1 runs in **shadow mode**: if `models/layer1_iforest.joblib` exists, the gate
+writes `l1_score` (0 to 1) on every record and never consults it for enforcement.
+Fusion is not built, so there is still no composite score.
+
+### Layer 1 in one paragraph
+
+18 features per call (`detection/features.py`), computed online from the call and
+the calls before it in the session: per-role rarity of the tool, schema, hour,
+target and payee; volume, amount and text length as robust z-scores against the
+same role and tool; windowed call rate, tool diversity and entropy over recent
+calls; sandbox-refusal share; delegation depth; cumulative session volume. Never
+Layer 3's verdict, never labels, never latency. Trained on benign traffic only;
+no `contamination` parameter. The raw score is calibrated on a separate benign
+split, so the call threshold (q=0.99) means about 1% of benign calls exceed it,
+and a separate session threshold (q=0.95) is calibrated on session maxima. Full
+rationale in the module docstrings; every design iteration and its numbers in
+`reports/layer1/DEVELOPMENT.md`.
+
+**Current results** (`reports/layer1/results.md`; 5-seed means; benign holdout of
+1,000 sessions; 8 behavioural scenarios x 40 sessions, all policy-compliant by
+design):
+
+| | Layer 1 | Layer 3 |
+|---|---:|---:|
+| Benign FPR per call | 0.9% | 6.5% |
+| Benign FPR per session | 4.7% | 13.5% |
+| Behavioural attack sessions caught | ~56% | ~10% |
+| Caught by Layer 1 and not Layer 3 | ~179 of 320 | |
+
+Strong on night-time HR work, delegation pivots into payouts, bulk dumps, data
+staging and secret harvesting with whitelisted commands. Weak on salami payments
+to new payees, low-and-slow paginated extraction, and anything outside the
+training range (it cannot tell a 75k payment from the benign cluster at the
+limit). Blind to content (instruction text in arguments) and to mimicry. The
+misses and their mechanisms are listed in `DEVELOPMENT.md`; they are the honest
+case for Layers 2 and 4.
+
+**These are development numbers.** The detector was iterated against this attack
+set, the attack traces are scripted, and benign and attack traffic come from the
+same simulator. They show detector sensitivity in a synthetic enterprise, not a
+field detection rate. Freeze the design and evaluate on newly written scenarios
+before quoting final results.
 
 ---
 
@@ -106,15 +159,23 @@ machine-learning detection layers are not built yet.**
 - Layer 3 rule engine, RB-000 to RB-006, severity-ordered findings.
 - `ToolCallRecord` schema, JSONL corpus, replay loader, SQLite checkpointing.
 - Red-team framework: 6 attacks and 2 benign controls, with metrics.
-- Benign traffic generator; 3,941 calibration and 3,975 holdout records generated.
-- 56 test functions, 72 cases under parametrisation. 63 cover the security system;
-  the remaining 9 check that `build tracker.html` stays self-contained, which is
-  documentation tooling rather than a result.
+- One benign workload model (`workload.py`) shared by the scripted planner and the
+  corpus generator; benign sessions run through the real graph, gate and mock
+  tools (about 15 calls per session). Train 1,500 / calib 1,000 / holdout 1,000
+  sessions, separate seeds.
+- Observe mode, one corpus file per source (`event_logger.CORPUS`).
+- 13 behavioural attack traces (`red_team/behavioural.py`), run as sessions with
+  benign cover traffic; only the attack calls carry the attack label.
+- Layer 1 Isolation Forest: features, training, calibration, evaluation against
+  Layer 3 on the same calls, shadow scoring in the gate.
+- 112 tests. `test_layer1.py` checks the properties that make a Layer 1 number
+  defensible (no leakage from Layer 3 or labels, no look-ahead, live scoring
+  equals offline scoring, benign-only training, calibration).
 
 **Not built**
 
-Isolation Forest, LSTM autoencoder, semantic judge, score fusion, policy linter,
-adaptive-attacker rounds, external benchmark adapters.
+LSTM autoencoder, semantic judge, score fusion, policy linter, adaptive-attacker
+rounds, external benchmark adapters.
 
 ### About the current numbers
 
@@ -123,7 +184,8 @@ quoted as a result yet**, and the tooling says so where it prints them:
 
 - Six attacks, each written against a specific rule. That measures self-consistency,
   not capability.
-- Only two benign controls. The ~3,900-record benign corpus has not been scored yet.
+- Only two benign controls in this suite. The benign corpus *has* now been scored:
+  Layer 3 runs at about 6.5% per-call / 13.5% per-session FPR on it (below).
 - The no-monitor baseline reads 0 %, but *by construction*: scenarios call the
   detection engine directly and never pass through the orchestrating LLM, so with the
   rule engine disabled nothing in the path could refuse anything. Until scenarios run
@@ -145,7 +207,10 @@ python -m pytest tests/ -q      # test suite                      (no API key)
 python demo.py --fast           # narrated policy demo            (no API key)
 python -m red_team.runner       # attack suite + metrics          (no API key)
 python -m red_team.baseline     # monitor-on vs monitor-off       (no API key)
-python normal_traffic.py        # generate benign corpus + FPR    (no API key)
+python normal_traffic.py --all  # benign corpus splits + Layer 3 FPR (no API key)
+python -m red_team.behavioural  # behavioural attack traces       (no API key)
+python -m detection.train       # train Layer 1                   (no API key)
+python -m detection.evaluate    # Layer 1 vs Layer 3              (no API key)
 
 python app.py                   # full graph, persistent session  (needs API key)
 langgraph dev                   # LangGraph Studio                (needs API key)
@@ -165,6 +230,8 @@ start clean.
 | `MAX_DELEGATION_DEPTH` | `3` | Agent-to-agent delegation cap |
 | `SIM_HOUR` | *(unset)* | Pin the simulated clock, for reproducible RB-006 |
 | `SIM_TIME_DEFAULT_INCREMENT` | `2.0` | Seconds each tool call advances the sim clock |
+| `LAYER1_MODEL` | `models/layer1_iforest.joblib` | Layer 1 model for shadow scoring |
+| `LAYER1_SHADOW` | `1` | `0` disables Layer 1 shadow scoring in the gate |
 
 ---
 
@@ -181,7 +248,15 @@ mock_tools.py         The 8 mock tool implementations.
 logging_schema.py     ToolCallRecord (19 fields) + hashing and timestamp helpers.
 event_logger.py       Appends to logs/tool_calls.jsonl, exposes load_all().
 attack_context.py     Scoped red-team ground-truth labelling.
-normal_traffic.py     Benign corpus generator + false-positive harness.
+workload.py           The one benign workload model (tool mix, arguments, hours, long tail).
+normal_traffic.py     Benign corpus generator (through the real graph) + Layer 3 FPR report.
+detection/
+  patterns.py         Injection heuristic used by RB-005.
+  features.py         Layer 1 features, online and offline from one code path.
+  isolation_forest.py Layer1Detector (fit, calibrate, score, save) + ShadowScorer.
+  train.py            python -m detection.train
+  evaluate.py         python -m detection.evaluate
+reports/layer1/       results.md, results.json, DEVELOPMENT.md (iteration log).
 demo.py               Narrated console demo for supervisor meetings.
 simulation_graph.py   Deprecated re-export shim. Do not add logic here.
 red_team/
@@ -189,8 +264,10 @@ red_team/
   scenarios.py        6 attacks + 2 benign controls.
   runner.py           Runs the suite, prints the confusion matrix and metrics.
   baseline.py         No-monitor control condition.
-tests/                rule engine (26), enforcement gate (8), ground truth (7),
-                      baseline (6), tracker html (9).
+  behavioural.py      13 behavioural attack traces, run as sessions in observe mode.
+tests/                rule engine, enforcement gate, ground truth, baseline, end to end,
+                      foundation (corpus + gate regressions), layer1 (detector contract),
+                      tracker html.
 build tracker.html    Standalone build tracker. Open it directly in a browser.
 ```
 
@@ -205,6 +282,34 @@ Tracked openly rather than quietly fixed, because several are thesis-relevant
 limitations rather than bugs. Two earlier entries in this section have since been
 closed and removed: the ground-truth label is no longer derived from the expectation
 it is checked against, and red-team labelling is now actually applied at runtime.
+
+**Closed in the Layer 1 branch**
+
+- Benign corpus bypassed the gate (own volume, own privilege strings, no
+  delegation): now generated through the real graph.
+- Every graph session ended after one tool call: agents now loop.
+- Scripted e2e "attack" runs could be persisted with an attack label although the
+  plan never read the attack text: refused now.
+- Red-team and benign records shared `logs/tool_calls.jsonl`: one file per source.
+- `ToolCallRecord` had no simulated hour or time: added (`sim_hour`,
+  `sim_time_seconds`, `delegation_depth`, `enforcement_mode`, `planner`, `l1_score`).
+- Mock DB volume ignored query shape: point lookups, aggregates, filters, full
+  scans and LIMIT now behave differently.
+- `security_monitor.py` imported its injection heuristic from `mock_tools.py`:
+  moved to `detection/patterns.py`.
+
+**Policy findings from the benign FPR harness** (findings, not tuned away)
+
+- *Fixed:* `customer_service_agent` carried a 500 refund limit but
+  `call_payment_api` was not whitelisted, so RB-002 contained every refund and the
+  limit was dead config. All 235 CONTAIN false positives in the old corpus were
+  refunds.
+- *Open:* RB-006 judges the **executing** role's hours. When DevOps (24/7)
+  delegates to Finance at night, Finance trips the after-hours rule. Most of
+  Layer 3's benign false positives are this. Whether that is correct is a policy
+  decision, and a thesis point about rules that ignore delegation context.
+- *Open:* RB-004's finance payment cap (5 per 60 s) fires on busy but legitimate
+  payment runs.
 
 **Methodological — these affect whether results are defensible**
 
@@ -232,8 +337,6 @@ it is checked against, and red-team labelling is now actually applied at runtime
 - Delegation depth *is* capped (`MAX_DELEGATION_DEPTH`), but the cap lives in the
   graph and the planner rather than the rule engine, so exceeding it produces no
   finding and no record. The monitor cannot see it happen.
-- `security_monitor.py` imports `contains_instruction_pattern` from `mock_tools.py`,
-  so the rule engine depends on the tool mocks. Should move to a detection package.
 - Shell whitelist, network-pattern blocks and path-traversal guards are still
   hardcoded in `mock_tools.py` instead of living in the policy file.
 
@@ -265,9 +368,9 @@ Build order is dependency-driven:
 1. **Run scenarios end-to-end through the graph.** Restores the LLM to the attack
    path, makes the baseline a real experiment, and makes injection results
    defensible.
-2. **Score the existing benign corpus** and record the rule engine's false-positive
-   rate. Already generated, no model cost.
-3. **Isolation Forest (Layer 1)**, trained benign-only, with a measured FPR.
+2. ~~Score the benign corpus~~ done: Layer 3 FPR measured, two policy findings.
+3. ~~Isolation Forest (Layer 1)~~ built, shadow mode. Next for it: evaluate on
+   scenarios written after the design freeze.
 4. **Score fusion** and tier calibration.
 5. **LSTM autoencoder (Layer 2)** and **semantic judge (Layer 4)**.
 6. **Scenario expansion** — 6 implemented against a 24+ target. Confirmed gaps:

@@ -38,7 +38,11 @@ agents:
       write_file: 15
 
   customer_service_agent:
-    allowed_tools: [db_query, create_ticket, send_email, read_file]
+    # call_payment_api added 2026-10. The role always carried a 500 refund limit
+    # (RB-003), but the tool was missing from this whitelist, so every refund was
+    # contained by RB-002 and the limit was dead config. The benign FPR harness
+    # surfaced it: all 235 CONTAIN false positives in the old corpus were refunds.
+    allowed_tools: [db_query, create_ticket, send_email, read_file, call_payment_api]
     db_schemas: [crm, tickets]
     privilege_level: "LOW"
     payment_limit: 500       # refunds only

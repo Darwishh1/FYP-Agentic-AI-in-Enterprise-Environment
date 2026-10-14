@@ -16,12 +16,29 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import fields
 from pathlib import Path
 
 from logging_schema import ToolCallRecord
 
 
 _DEFAULT_PATH = os.path.join("logs", "tool_calls.jsonl")
+_FIELDS = {f.name for f in fields(ToolCallRecord)}
+
+# Corpus files, one per source. They used to share logs/tool_calls.jsonl, so a
+# default red-team run and a default benign run ended up in the same file, and
+# direct-mode red-team records (privilege "unknown", zero bytes, session length 1)
+# were trivially separable from everything else for reasons unrelated to attacks.
+# Layer 1 trains on benign_train only; nothing else may feed it.
+CORPUS = {
+    "live": _DEFAULT_PATH,                                    # app.py / ad-hoc graph runs
+    "benign_train": os.path.join("logs", "benign_train.jsonl"),
+    "benign_calib": os.path.join("logs", "benign_calib.jsonl"),
+    "benign_holdout": os.path.join("logs", "benign_holdout.jsonl"),
+    "attack_behavioural": os.path.join("logs", "attack_behavioural.jsonl"),
+    "redteam_direct": os.path.join("logs", "redteam_direct.jsonl"),  # never feeds Layer 1
+    "redteam_e2e": os.path.join("logs", "redteam_e2e.jsonl"),        # LLM planner only
+}
 
 
 class EventLogger:
@@ -46,6 +63,9 @@ class EventLogger:
                 if not line:
                     continue
                 d = json.loads(line)
+                # Drop keys this version of the schema does not know, so a corpus
+                # written by a newer schema still loads instead of crashing.
+                d = {k: v for k, v in d.items() if k in _FIELDS}
                 records.append(ToolCallRecord(**d))
         return records
 
