@@ -17,7 +17,7 @@ and the audit trail. This is the rule input that later fuses with the statistica
 """
 import yaml
 
-from mock_tools import contains_instruction_pattern
+from detection.patterns import contains_instruction_pattern
 
 _SEVERITY = {"PASS": 0, "WARN": 1, "ALERT": 2, "CONTAIN": 3}
 
