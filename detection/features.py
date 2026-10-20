@@ -109,6 +109,8 @@ _FREE_TEXT = {"db_query": "query", "execute_shell": "command", "send_email": "bo
 def _target(tool: str, args: dict) -> str | None:
     """The 'who/what' of a call, coarse enough that benign variety collapses."""
     args = args or {}
+    if "__target__" in args:            # external-dataset adapters (detection/cert) set
+        return args["__target__"]       # the target directly; the simulator never does
     if tool == "send_email":
         to = str(args.get("to", ""))
         return to.split("@", 1)[-1].lower() if "@" in to else to.lower()
@@ -164,6 +166,8 @@ def _amount(tool: str, args: dict) -> float | None:
 
 
 def _text_len(tool: str, args: dict) -> float:
+    if args and "__text_len__" in args:  # adapter-supplied length (see _target)
+        return math.log1p(max(float(args["__text_len__"]), 0.0))
     return math.log1p(len(str((args or {}).get(_FREE_TEXT.get(tool, ""), "") or "")))
 
 

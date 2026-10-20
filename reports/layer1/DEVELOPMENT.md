@@ -77,3 +77,18 @@ is fitting the detector to its own test. Stopped at v3.
    design. Nothing in the feature set reads meaning. That is Layer 4.
 5. **Mimicry.** B-108 (duplicate payment to a real vendor at a normal amount) is
    0/40 and will stay 0 for any behavioural detector. Included deliberately.
+
+## External validation: CERT r4.2 (added 2026-10-20)
+
+Purpose: check the per-role feature design is not just fitted to the simulator,
+by applying the frozen Layer 1 (no retuning) to the CERT Insider Threat Test
+Dataset r4.2. Code: `detection/cert/`. Run:
+
+    python -m detection.cert.prepare --data r4.2.tar.bz2 --answers answers.tar.bz2
+    python -m detection.cert.evaluate          # -> reports/layer1/cert/results.md
+
+The only change to Layer 1 is two optional record keys (`__target__`,
+`__text_len__`) that adapters use to supply the target and free-text length;
+simulator records never carry them, so simulator results are unchanged.
+Mapping, splits and caveats are in the `detection/cert/evaluate.py` docstring.
+Includes a role-blind ablation to isolate what per-role baselines contribute.
