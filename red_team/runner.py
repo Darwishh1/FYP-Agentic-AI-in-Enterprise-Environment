@@ -24,7 +24,7 @@ except (AttributeError, ValueError):
     pass
 
 from security_monitor import SecurityMonitor
-from event_logger import EventLogger
+from event_logger import EventLogger, CORPUS
 from red_team.scenarios import SCENARIOS
 
 
@@ -58,7 +58,9 @@ def run_suite(monitor=None, logger=None, *, log=True, e2e=False,
     """
     monitor = monitor if monitor is not None else SecurityMonitor()
     if logger is None and log:
-        logger = EventLogger()  # logs/tool_calls.jsonl
+        # Its own file. Direct-mode records (one call, privilege "unknown", zero
+        # bytes) must never sit in a corpus a statistical detector reads.
+        logger = EventLogger(path=CORPUS["redteam_direct"])
 
     if e2e:
         skipped = [s for s in SCENARIOS if not s.supports_e2e()]

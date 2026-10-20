@@ -50,33 +50,51 @@ def _deterministic_scale(seed_text: str, lo: int, hi: int) -> int:
     return lo + (int.from_bytes(digest[:4], "big") % span)
 
 
-# Rough per-schema row scale, so a `SELECT *` against a big table returns more
-# than one against a small one. Crude, but it makes volume mean something.
-_SCHEMA_SCALE = {
-    "hr": (1, 400), "finance": (1, 900), "accounts": (1, 600),
-    "devops": (1, 1500), "logs": (1, 5000), "crm": (1, 300), "tickets": (1, 800),
+# Table sizes per schema, and a query-shape model on top of them. The first
+# version drew rows uniformly up to a per-schema cap and let only `SELECT *`
+# without LIMIT reach the cap, so a point lookup by id could return 300 rows and
+# a full-table dump of `hr` returned the same 400 rows a routine filtered query
+# could. Volume could not distinguish a dump from normal work, which is the one
+# thing an exfiltration detector needs it to do. Crude still, but shape-aware:
+#   aggregate (COUNT/SUM/AVG/MIN/MAX, no GROUP BY)  -> 1 row
+#   equality on an id column                        -> 1-3 rows
+#   any other WHERE                                 -> 0.1%-5% of the table
+#   no WHERE                                        -> the whole table
+#   LIMIT n                                         -> capped at n
+_TABLE_ROWS = {
+    "hr": 2_000, "finance": 20_000, "accounts": 5_000,
+    "devops": 3_000, "logs": 200_000, "crm": 50_000, "tickets": 30_000,
 }
 _BYTES_PER_ROW = 180
 
 
+def estimate_rows(schema: str, query: str) -> int:
+    q = query or ""
+    table = _TABLE_ROWS.get(schema, 1_000)
+    seed = f"{schema}|{q}"
+    if re.search(r"\b(count|sum|avg|min|max)\s*\(", q, re.IGNORECASE) and not re.search(r"group\s+by", q, re.IGNORECASE):
+        rows = 1
+    elif not re.search(r"\bwhere\b", q, re.IGNORECASE):
+        rows = table
+    elif re.search(r"\b\w*id\s*=\s*'?[\w-]+'?", q, re.IGNORECASE):
+        rows = _deterministic_scale(seed, 1, 3)
+    else:
+        rows = _deterministic_scale(seed, max(1, table // 1000), max(2, table // 20))
+    limit_match = re.search(r"\blimit\s+(\d+)", q, re.IGNORECASE)
+    if limit_match:
+        rows = min(rows, int(limit_match.group(1)))
+    return rows
+
+
 def db_query(schema: str, query: str, context: dict) -> ToolResult:
-    """Simulated DB query. Row count scales with the schema and the query shape."""
+    """Simulated DB query. Row count follows the table size and the query shape."""
     role = context.get("agent_role")
 
     if role == "customer_service_agent" and schema == "hr":
         return ToolResult("ERROR: Access Denied. Privilege insufficient for HR schema.",
                           rows=0, bytes=0, status="DENIED")
 
-    lo, hi = _SCHEMA_SCALE.get(schema, (1, 200))
-    rows = _deterministic_scale(f"{schema}|{query}", lo, hi)
-
-    # An unbounded SELECT * pulls the whole table; a LIMIT clause caps it.
-    if re.search(r"select\s+\*", query or "", re.IGNORECASE) and not re.search(r"\blimit\b", query or "", re.IGNORECASE):
-        rows = hi
-    limit_match = re.search(r"\blimit\s+(\d+)", query or "", re.IGNORECASE)
-    if limit_match:
-        rows = min(rows, int(limit_match.group(1)))
-
+    rows = estimate_rows(schema, query)
     return ToolResult(f"Returned {rows} rows from '{schema}'.", rows=rows, bytes=rows * _BYTES_PER_ROW)
 
 
@@ -138,16 +156,6 @@ def escalate_to_human(reason: str, context: dict) -> ToolResult:
                       rows=None, bytes=len((reason or "").encode()))
 
 
-def contains_instruction_pattern(text: str) -> bool:
-    """Heuristic used by the rule layer (RB-005): does this text look like an
-    injected natural-language instruction rather than a normal tool argument?"""
-    if not text:
-        return False
-    patterns = [
-        r"ignore (all |the )?(previous|prior|above) instructions",
-        r"disregard (your|the) (rules|policy|instructions)",
-        r"you are now",
-        r"act as",
-        r"system prompt",
-    ]
-    return any(re.search(p, text, re.IGNORECASE) for p in patterns)
+# Moved to detection/patterns.py so the rule engine does not depend on the tool
+# mocks. Re-exported here so existing imports keep working.
+from detection.patterns import contains_instruction_pattern  # noqa: E402,F401

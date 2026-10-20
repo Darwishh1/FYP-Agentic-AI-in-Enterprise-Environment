@@ -8,3 +8,5 @@ checkpoints.sqlite-*
 tool_calls.log
 .vexp/
 logs/
+models/
+data/cert/
